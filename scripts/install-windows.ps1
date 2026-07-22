@@ -240,7 +240,28 @@ function Disable-CMakeConfig([string] $Reason) {
     $stub = 'message(FATAL_ERROR "setup-clblast could not safely repair CLBlastConfig.cmake for CLBlast ' +
             $Version + ': ' + $Reason +
             '. Use the CLBLAST_CPPFLAGS and CLBLAST_LIBS environment variables instead of find_package(CLBlast) in this job.")'
-    Set-Content -Path $cmakeConfig -Value $stub -NoNewline
+
+    # find_package(CLBlast) in config mode accepts EITHER 'CLBlastConfig.cmake'
+    # or the lowercase 'clblast-config.cmake', and loads whichever it finds
+    # first. Stubbing only the name this script happens to know about leaves
+    # the other one loadable, so the refusal silently does not hold. Stub every
+    # candidate in the directory, and fail loudly if there are none -- a
+    # Disable-CMakeConfig call that writes nothing is a fail-closed guarantee
+    # that quietly is not one.
+    $candidates = @(Get-ChildItem -Path $cmakeDir -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -ieq 'CLBlastConfig.cmake' -or $_.Name -ieq 'clblast-config.cmake' })
+
+    if ($candidates.Count -eq 0) {
+        Write-Output "::error::No CLBlast CMake config file found under $cmakeDir to disable"
+        Write-Output "setup-clblast refuses to continue rather than leave find_package(CLBlast) able to load an unrepaired config. Report this at https://github.com/coatless-actions/setup-clblast/issues"
+        exit 1
+    }
+
+    foreach ($c in $candidates) {
+        Set-Content -Path $c.FullName -Value $stub -NoNewline
+        # stderr, never stdout: stdout carries the key=value contract.
+        [Console]::Error.WriteLine("Disabled CMake config: $($c.FullName)")
+    }
 }
 
 if ($loaderInclude -and $loaderLibrary) {

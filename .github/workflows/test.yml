@@ -622,6 +622,16 @@ jobs:
           cmake_minimum_required(VERSION 3.16)
           project(clblast_regression C)
           find_package(CLBlast REQUIRED)
+          # If we reach here the stub did not fire. Report exactly which file
+          # find_package loaded and what the imported target points at, so the
+          # log says why rather than leaving us to guess -- CMake accepts a
+          # nonexistent path in INTERFACE_LINK_LIBRARIES at configure time, so
+          # a vcpkg-tainted config configures perfectly cleanly.
+          message(STATUS "REGRESSION CLBlast_CONFIG=${CLBlast_CONFIG}")
+          if(TARGET clblast)
+            get_target_property(_ill clblast INTERFACE_LINK_LIBRARIES)
+            message(STATUS "REGRESSION INTERFACE_LINK_LIBRARIES=${_ill}")
+          endif()
           add_executable(consumer consumer.c)
           target_link_libraries(consumer PRIVATE clblast)
           PROJECT
