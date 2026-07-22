@@ -179,25 +179,42 @@ jobs:
             exit 1
           }
 
-          "${compiler}" -o consumer consumer.o \
+          # mingw's linker silently appends .exe to a -o target that has no
+          # recognized executable suffix, regardless of what name was asked
+          # for, so the produced file on Windows is consumer.exe, not
+          # consumer. Compute the name actually produced rather than assume
+          # it, mirroring how the CMake consumer step below already globs
+          # for whatever cmake --build actually emitted.
+          bin="consumer"
+          [ "${RUNNER_OS}" = "Windows" ] && bin="consumer.exe"
+
+          "${compiler}" -o "${bin}" consumer.o \
             ${CLBLAST_LIBS} ${OPENCL_LIBS}
 
           echo "--- load-time dependency on libclblast ---"
           if [ "$(uname -s)" = "Darwin" ]; then
-            otool -L consumer
-            otool -L consumer | grep -qi clblast || {
+            otool -L "${bin}"
+            otool -L "${bin}" | grep -qi clblast || {
               echo "::error::consumer's Mach-O load commands (otool -L) show no libclblast dependency"
               exit 1
             }
+          elif [ "${RUNNER_OS}" = "Windows" ]; then
+            # readelf reads ELF, not PE -- objdump's import-table dump is the
+            # PE equivalent of otool -L / readelf -d here.
+            objdump -p "${bin}"
+            objdump -p "${bin}" | grep -qi 'DLL Name: clblast' || {
+              echo "::error::consumer's PE import table (objdump -p) shows no clblast.dll dependency"
+              exit 1
+            }
           else
-            readelf -d consumer
-            readelf -d consumer | grep -qi clblast || {
+            readelf -d "${bin}"
+            readelf -d "${bin}" | grep -qi clblast || {
               echo "::error::consumer's dynamic section (readelf -d) has no NEEDED entry for libclblast"
               exit 1
             }
           fi
 
-          ./consumer
+          "./${bin}"
           echo "flag-based consumer ran and exited 0"
 
       # find_package(CLBlast) is the other half of the export contract, and
@@ -237,6 +254,14 @@ jobs:
             otool -L "${consumer_bin}"
             otool -L "${consumer_bin}" | grep -qi clblast || {
               echo "::error::CMake-built consumer's Mach-O load commands (otool -L) show no libclblast dependency"
+              exit 1
+            }
+          elif [ "${RUNNER_OS}" = "Windows" ]; then
+            # readelf reads ELF, not PE -- objdump's import-table dump is the
+            # PE equivalent of otool -L / readelf -d here.
+            objdump -p "${consumer_bin}"
+            objdump -p "${consumer_bin}" | grep -qi 'DLL Name: clblast' || {
+              echo "::error::CMake-built consumer's PE import table (objdump -p) shows no clblast.dll dependency"
               exit 1
             }
           else
