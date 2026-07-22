@@ -52,6 +52,8 @@ jobs:
           # with a known GEMM bug" step names; its commit comes from
           # `git ls-remote --tags https://github.com/CNugteren/CLBlast 1.6.3`.
           - { os: ubuntu-24.04,     source: build,   expect-source: build,   expect-version: '1.6.3', cache: 'true', version: '1.6.3', commit: '2a081972b20911ddf76a6b40df717c7d0c181268' }
+          - { os: windows-2025,     source: auto,    expect-source: package, expect-version: '1.7.0', cache: 'true' }
+          - { os: windows-2022,     source: auto,    expect-source: package, expect-version: '1.7.0', cache: 'true' }
 
     steps:
       - name: Checkout the action
