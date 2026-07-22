@@ -222,6 +222,7 @@ runs:
         script_hash="$(
           { hash_of "${GITHUB_ACTION_PATH}/scripts/build-clblast.sh"
             hash_of "${GITHUB_ACTION_PATH}/scripts/install-macos.sh"
+            hash_of "${GITHUB_ACTION_PATH}/scripts/install-windows.ps1"
           } | tr -d '\n'
         )"
         echo "script-hash=${script_hash}" >> "$GITHUB_OUTPUT"
@@ -242,9 +243,10 @@ runs:
           exit 1
         fi
 
-    # Only macOS builds from source and is therefore worth caching. A Linux
-    # apt install and a Windows archive extraction are fast enough that the
-    # cache round-trip would not pay for itself.
+    # macOS builds from source; Windows downloads and extracts a ~1.6 MB
+    # archive. Both are worth caching, and both live under the same prefix,
+    # so one step covers them. Linux is an apt install with nothing local to
+    # cache.
     #
     # Measured on macos-latest, run 29892787040 (2026-07-22): the 'Install
     # CLBlast' step took ~29s wall on the cache: false leg (a cold build
@@ -263,8 +265,8 @@ runs:
     # level (the tree is rebuilt), but only after paying the full restore +
     # discard + rebuild cost on every single run with no cache ever winning;
     # putting the commit in the key lets a genuine cache hit stay a hit.
-    - name: Restore the CLBlast build cache
-      if: runner.os == 'macOS' && inputs.cache == 'true'
+    - name: Restore the CLBlast cache
+      if: runner.os != 'Linux' && inputs.cache == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/clblast
@@ -300,11 +302,38 @@ runs:
         printf '%s\n' "${output}"
         printf '%s\n' "${output}" | grep -E '^[a-z][a-z0-9-]*=' >> "$GITHUB_OUTPUT"
 
+    - name: Install CLBlast (Windows)
+      id: install-windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        SC_SOURCE: ${{ steps.resolve.outputs.resolved-source }}
+        SC_VERSION: ${{ steps.resolve.outputs.resolved-version }}
+        # Only used to resolve the release asset's name and digest without
+        # hitting the GitHub API's anonymous rate limit.
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        # The install script's stdout carries ::error:: and ::warning::
+        # diagnostics alongside its key=value contract, so only lines that
+        # look like a well-formed key=value pair are safe to forward to
+        # GITHUB_OUTPUT -- otherwise a diagnostic line poisons the file and
+        # the runner rejects it with its own "Invalid format" error, burying
+        # the real one. This mirrors the non-Windows install step's grep.
+        & "$env:GITHUB_ACTION_PATH\scripts\install-windows.ps1" | ForEach-Object {
+          Write-Output $_
+          if ($_ -match '^[a-z][a-z0-9-]*=') {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value $_
+          }
+        }
+        # install-windows.ps1's own `exit 1` only ends its own scope, not
+        # this wrapper's -- propagate its exit code explicitly.
+        if ($LASTEXITCODE) {
+          exit $LASTEXITCODE
+        }
+
     # Merges the per-OS install outputs into one canonical set. This is a
     # shell step, not a ${{ a || b }} expression, because Actions' || is
     # truthiness based: a legitimate '0' or 'false' would be discarded.
-    # install-windows is wired in by Task 6; until then its outputs are all
-    # unset and the WIN side resolves to empty strings.
     - name: Collect install results
       id: collect
       shell: bash
