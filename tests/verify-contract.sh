@@ -18,7 +18,7 @@ set -uo pipefail
 
 expected="${1:-ok}"
 case "${expected}" in
-    ok|wrong-result|no-platform|no-device|context-failed|queue-failed) ;;
+    ok|wrong-result|no-platform|no-device|context-failed|queue-failed|buffer-failed) ;;
     *)
         printf 'FAIL: unknown expected-status "%s"\n' "${expected}" >&2
         exit 1

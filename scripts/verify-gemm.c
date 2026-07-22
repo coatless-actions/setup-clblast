@@ -110,14 +110,25 @@ int main(void)
     queue = clCreateCommandQueue(ctx, device, 0, &err);
     if (err != CL_SUCCESS) { return bail("queue-failed"); }
 
+    /* Checked individually, not just on the last call: if an earlier buffer
+     * fails and a later one happens to succeed, the earlier failure must
+     * not be missed and an invalid cl_mem must not be passed to CLBlast.
+     * "buffer-failed" is its own status, distinct from "context-failed",
+     * so a CI log points at buffer allocation rather than context
+     * creation. */
     da = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof a, NULL, &err);
+    if (err != CL_SUCCESS) { return bail("buffer-failed"); }
     db = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof b, NULL, &err);
+    if (err != CL_SUCCESS) { return bail("buffer-failed"); }
     dc = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof c, NULL, &err);
-    if (err != CL_SUCCESS) { return bail("context-failed"); }
+    if (err != CL_SUCCESS) { return bail("buffer-failed"); }
 
-    clEnqueueWriteBuffer(queue, da, CL_TRUE, 0, sizeof a, a, 0, NULL, NULL);
-    clEnqueueWriteBuffer(queue, db, CL_TRUE, 0, sizeof b, b, 0, NULL, NULL);
-    clEnqueueWriteBuffer(queue, dc, CL_TRUE, 0, sizeof c, c, 0, NULL, NULL);
+    err = clEnqueueWriteBuffer(queue, da, CL_TRUE, 0, sizeof a, a, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { return bail("queue-failed"); }
+    err = clEnqueueWriteBuffer(queue, db, CL_TRUE, 0, sizeof b, b, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { return bail("queue-failed"); }
+    err = clEnqueueWriteBuffer(queue, dc, CL_TRUE, 0, sizeof c, c, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { return bail("queue-failed"); }
 
     st = CLBlastSgemm(CLBlastLayoutRowMajor,
                       CLBlastTransposeNo, CLBlastTransposeNo,
@@ -133,7 +144,8 @@ int main(void)
     }
     if (ev != NULL) { clWaitForEvents(1, &ev); clReleaseEvent(ev); }
     clFinish(queue);
-    clEnqueueReadBuffer(queue, dc, CL_TRUE, 0, sizeof c, c, 0, NULL, NULL);
+    err = clEnqueueReadBuffer(queue, dc, CL_TRUE, 0, sizeof c, c, 0, NULL, NULL);
+    if (err != CL_SUCCESS) { return bail("queue-failed"); }
 
     for (i = 0; i < (size_t)N * N; i++)
     {
