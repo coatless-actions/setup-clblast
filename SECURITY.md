@@ -21,15 +21,21 @@ install the CLBlast BLAS library and report where the result landed:
   this action fetches and must independently verify a third-party binary
   archive.
 
-The design commits to verifying every such archive against a SHA-256
-digest before extraction, fail-closed -- a download with nothing to verify
-against is refused rather than installed unverified, the same guarantee
-`setup-opencl` gives its own downloads. **As of this revision, that
-download-and-verify logic for the Windows path has not been implemented
-yet**; it is planned for a later change to this repository. This section
-will be updated with the actual mechanism -- including which versions ship
-a published digest and what happens when one is missing -- once that code
-exists, rather than asserting behavior that is not yet there.
+Every such archive is verified against a SHA-256 digest before extraction,
+fail-closed -- a download with nothing to verify against is refused rather
+than installed unverified, the same guarantee `setup-opencl` gives its own
+downloads. `scripts/install-windows.ps1` resolves the expected digest in
+this order: (1) a hand-maintained `$KnownDigests` table in that script,
+seeded with digests computed out of band for versions the GitHub Releases
+API predates; (2) the `digest` field the GitHub API reports for newer
+releases; (3) failure. If neither source has a digest for the requested
+version, the action stops with an `::error::` before downloading anything --
+there is no path that installs an archive it could not verify. The
+`.github/workflows/update-clblast.yml` workflow that bumps the pinned
+default version to a new upstream release enforces the same rule: it
+refuses to open a pull request for a release whose Windows asset has no
+resolvable digest, rather than proposing a bump that the Windows leg of
+`Test` cannot pass.
 
 The action also exports the resolved install location (include/library
 paths and, on Windows, the DLL directory) into job outputs and, on
