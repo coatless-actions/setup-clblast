@@ -104,6 +104,20 @@ jobs:
       # the action's internals. This is the contract consumers depend on --
       # in particular CLBLAST_CPPFLAGS and CLBLAST_LIBS, the two names
       # RcppBandicoot's configure.win reads verbatim.
+      #
+      # consumer.c's CLBlastSgemm call is guarded by `argc > 99`, which is
+      # unknown at compile time, so the compiler cannot fold the branch away
+      # and a real reference to CLBlastSgemm must survive into the object
+      # file. An earlier version of this program instead wrote
+      # `return (CLBlastSgemm == 0)`: every C compiler folds that to a
+      # compile-time-false constant at any optimization level, including
+      # -O0, because a reference to a non-weak external symbol's address is
+      # never null -- nothing about the symbol needs to survive compilation
+      # at all. That version compiled and linked with zero undefined symbols
+      # in the object and, on Ubuntu's --as-needed linker, produced a binary
+      # with no DT_NEEDED entry for libclblast: it proved only that the
+      # header parsed and that -lclblast matched a file on disk, never that
+      # the library actually loads.
       - name: Build a consumer program using only the exported environment
         shell: bash
         run: |
@@ -113,21 +127,68 @@ jobs:
           #include <stdio.h>
           #include <CL/cl.h>
           #include <clblast_c.h>
-          int main(void) {
+          int main(int argc, char **argv) {
+              (void)argv;
               printf("clblast header and library resolved\n");
-              return (CLBlastSgemm == 0);
+              if (argc > 99) {
+                  cl_command_queue queue = NULL;
+                  cl_event event = NULL;
+                  cl_mem a = NULL, b = NULL, c = NULL;
+                  CLBlastStatusCode st = CLBlastSgemm(CLBlastLayoutRowMajor,
+                      CLBlastTransposeNo, CLBlastTransposeNo,
+                      1, 1, 1,
+                      1.0f, a, 0, 1, b, 0, 1,
+                      0.0f, c, 0, 1,
+                      &queue, &event);
+                  return (int)st;
+              }
+              return 0;
           }
           PROGRAM
           compiler="cc"
           command -v cc >/dev/null 2>&1 || compiler="gcc"
-          "${compiler}" -o consumer consumer.c \
-            ${CLBLAST_CPPFLAGS} ${OPENCL_CPPFLAGS} \
+
+          # Compiled to an object first so the undefined-symbol check below
+          # inspects exactly what the compiler produced, before the linker
+          # gets a chance to resolve (and thereby hide) anything.
+          "${compiler}" -c -o consumer.o consumer.c \
+            ${CLBLAST_CPPFLAGS} ${OPENCL_CPPFLAGS}
+
+          echo "--- nm -u consumer.o (undefined symbols the compiler kept) ---"
+          nm -u consumer.o
+          nm -u consumer.o | grep -q CLBlastSgemm || {
+            echo "::error::consumer.o has no undefined reference to CLBlastSgemm; the compiler folded the guarded call away, so linking it would prove nothing about whether libclblast actually loads"
+            exit 1
+          }
+
+          "${compiler}" -o consumer consumer.o \
             ${CLBLAST_LIBS} ${OPENCL_LIBS}
+
+          echo "--- load-time dependency on libclblast ---"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            otool -L consumer
+            otool -L consumer | grep -qi clblast || {
+              echo "::error::consumer's Mach-O load commands (otool -L) show no libclblast dependency"
+              exit 1
+            }
+          else
+            readelf -d consumer
+            readelf -d consumer | grep -qi clblast || {
+              echo "::error::consumer's dynamic section (readelf -d) has no NEEDED entry for libclblast"
+              exit 1
+            }
+          fi
+
           ./consumer
+          echo "flag-based consumer ran and exited 0"
 
       # find_package(CLBlast) is the other half of the export contract, and
       # on Windows it is the half the action has to repair by hand. Prove it
-      # works everywhere rather than only where it happens to be undamaged.
+      # works everywhere rather than only where it happens to be undamaged --
+      # both that it builds AND that the resulting binary actually runs, not
+      # merely compiles. A build-only check would give the imported-target
+      # path zero load coverage: exactly the CLBlastSgemm-elided gap this
+      # step's sibling above exists to close for the flag-based path.
       - name: Consume the exported CLBlast_DIR from CMake
         shell: bash
         run: |
@@ -146,3 +207,27 @@ jobs:
           cp consumer.c cmake-consumer/
           cmake -S cmake-consumer -B cmake-consumer/build
           cmake --build cmake-consumer/build
+
+          consumer_bin="$(find cmake-consumer/build -maxdepth 2 -type f -name 'consumer*' ! -name '*.o' | head -n1)"
+          [ -n "${consumer_bin}" ] || {
+            echo "::error::No 'consumer' binary found under cmake-consumer/build after cmake --build"
+            exit 1
+          }
+
+          echo "--- load-time dependency on libclblast (CMake-built binary) ---"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            otool -L "${consumer_bin}"
+            otool -L "${consumer_bin}" | grep -qi clblast || {
+              echo "::error::CMake-built consumer's Mach-O load commands (otool -L) show no libclblast dependency"
+              exit 1
+            }
+          else
+            readelf -d "${consumer_bin}"
+            readelf -d "${consumer_bin}" | grep -qi clblast || {
+              echo "::error::CMake-built consumer's dynamic section (readelf -d) has no NEEDED entry for libclblast"
+              exit 1
+            }
+          fi
+
+          "${consumer_bin}"
+          echo "CMake-built consumer ran and exited 0"
