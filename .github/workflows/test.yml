@@ -372,9 +372,25 @@ jobs:
             > "${SC_ROOT}/.setup-clblast-stamp"
           cat "${SC_ROOT}/.setup-clblast-stamp"
 
+      # cache: false here, deliberately different from the first invocation.
+      # Measured on this job's first attempt: leaving this at the default
+      # 'true' re-runs 'Restore the CLBlast build cache' a second time in
+      # this same job, and since the cache key has not changed, that step
+      # gets a genuine actions/cache hit again and re-extracts the pristine
+      # tarball on top of the tree at ${{ runner.temp }}/clblast -- silently
+      # overwriting the corrupted stamp above with the original, uncorrupted
+      # one before install-macos.sh ever runs its check. That is a real
+      # property of actions/cache worth knowing (a restore step always
+      # re-extracts over whatever is already at 'path', unconditionally) but
+      # it defeats this job's purpose, so the second invocation is asked to
+      # skip the cache step and let install-macos.sh's gate run directly
+      # against the tree this job already has on disk, corrupted stamp and
+      # all.
       - name: Set up CLBlast again
         id: second
         uses: ./
+        with:
+          cache: 'false'
 
       - name: Confirm the mismatch forced a rebuild
         shell: bash
