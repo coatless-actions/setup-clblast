@@ -559,3 +559,87 @@ jobs:
             exit 1
           fi
           echo "Confirmed: CLBlast_DIR was correctly withheld for CLBlast 1.6.3."
+
+      # The check above only proves CLBlast_DIR is empty, and that was
+      # already true while the CLBlast_ROOT leak was live -- CLBlast_DIR was
+      # never the thing find_package(CLBlast) actually used to reach the
+      # broken config. CLBlast_ROOT is still exported unconditionally (for
+      # callers who only ever use CLBLAST_CPPFLAGS/CLBLAST_LIBS) and CMake's
+      # find_package() auto-recognizes it as a search hint under CMP0074, so
+      # the only way to prove the config is genuinely unreachable is to
+      # actually run find_package(CLBlast REQUIRED) the way a real consumer
+      # would, with CLBlast_DIR unset and CLBlast_ROOT still pointing at the
+      # extracted tree, and check what happens.
+      #
+      # Configure succeeding is not, by itself, proof of anything: CMake
+      # does not validate an imported target's INTERFACE_LINK_LIBRARIES for
+      # existence at configure time, so a vcpkg-tainted config configures
+      # cleanly and only fails at link time -- precisely why the original
+      # bug was invisible in the first place. This step therefore always
+      # goes on to attempt an actual build, linking a trivial executable
+      # against the imported 'clblast' target, so a configure-time escape
+      # cannot pass silently just because CMake's config step tolerates the
+      # bad path. The only accepted outcome is configure failing with the
+      # stub's own message; a configure that succeeds is a failure of this
+      # test regardless of whether the follow-up build then also fails.
+      - name: Prove find_package(CLBlast) cannot reach the broken vcpkg config
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cmake-regression
+          cat > cmake-regression/CMakeLists.txt <<'PROJECT'
+          cmake_minimum_required(VERSION 3.16)
+          project(clblast_regression C)
+          find_package(CLBlast REQUIRED)
+          add_executable(consumer consumer.c)
+          target_link_libraries(consumer PRIVATE clblast)
+          PROJECT
+          cat > cmake-regression/consumer.c <<'PROGRAM'
+          int main(void) { return 0; }
+          PROGRAM
+
+          set +e
+          configure_output="$(cmake -S cmake-regression -B cmake-regression/build 2>&1)"
+          configure_rc=$?
+          set -e
+          printf '%s\n' "${configure_output}"
+
+          if [ "${configure_rc}" -ne 0 ]; then
+            case "${configure_output}" in
+              *"setup-clblast could not safely repair"*) ;;
+              *)
+                echo "::error::cmake configure failed, but its output does not contain the stub's own message ('setup-clblast could not safely repair'). This may be an unrelated CMake failure rather than proof the broken config is unreachable, and would pass this assertion for the wrong reason."
+                exit 1
+                ;;
+            esac
+            case "${configure_output}" in
+              *vcpkg*)
+                echo "::error::cmake configure's output mentions 'vcpkg' -- the stub's own message never does, so the broken vcpkg-tainted config was reached rather than refused outright before it could be loaded"
+                exit 1
+                ;;
+            esac
+            echo "Confirmed: find_package(CLBlast) hits the stub's FATAL_ERROR at configure time and never reaches the vcpkg-tainted config."
+            exit 0
+          fi
+
+          # Configure succeeded, which already means the stub did not fire --
+          # the one thing this test exists to rule out for CLBlast 1.6.3,
+          # whose config this action's own rewrite cannot safely repair. The
+          # build below is diagnostic only, to show whether the leak also
+          # links (the worse case: a consumer gets a fully working target
+          # pointed at a path that happens not to exist on THIS runner) or
+          # merely fails at the linker (still a real failure of the
+          # fail-closed guarantee, since nothing makes that path's absence
+          # guaranteed on every runner) -- either way this step fails.
+          set +e
+          build_output="$(cmake --build cmake-regression/build 2>&1)"
+          build_rc=$?
+          set -e
+          printf '%s\n' "${build_output}"
+
+          if [ "${build_rc}" -eq 0 ]; then
+            echo "::error::cmake configured AND built successfully against CLBlast 1.6.3's config -- the imported target fully resolved and linked. find_package(CLBlast REQUIRED) should have failed via the stub; instead a consumer would silently link whatever this runner's vcpkg path happens to resolve to."
+          else
+            echo "::error::cmake configured successfully against CLBlast 1.6.3's config (the stub did not fire); the build then failed at link time instead, which is still a failure of this action's own fail-closed guarantee -- the config was only rejected because a hardcoded path happens not to exist on this runner, not because setup-clblast refused it."
+          fi
+          exit 1
