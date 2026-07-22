@@ -1,0 +1,437 @@
+name: 'Setup CLBlast'
+description: 'Install CLBlast and verify a GEMM produces correct results on GitHub-hosted runners'
+author: 'James J. Balamuta'
+
+branding:
+  icon: 'cpu'
+  color: 'blue'
+
+inputs:
+  version:
+    description: 'CLBlast version to install. Empty means the tested default for this runner: the distribution package on Linux, 1.7.0 on macOS and Windows. Honored for a source build on any OS and for the Windows release asset; ignored, with a warning, for a Linux package install'
+    required: false
+    default: ''
+  source:
+    description: 'Where CLBlast comes from: auto, package, or build. auto resolves to package on Linux and Windows and build on macOS. package is rejected on macOS (the Homebrew bottle links Apple''s framework and segfaults alongside the Khronos loader) and build is rejected on Windows'
+    required: false
+    default: 'auto'
+  verify:
+    description: 'Compile and run a 64x64 SGEMM against the installed library and fail the job when the result is numerically wrong ("true" or "false"). Never fatal when no OpenCL device is present'
+    required: false
+    default: 'true'
+  cache:
+    description: 'Cache the macOS source-build install tree ("true" or "false"). A no-op on runners that install a prebuilt package'
+    required: false
+    default: 'true'
+
+outputs:
+  clblast-root:
+    description: 'Root directory of the installed CLBlast'
+    value: ${{ steps.collect.outputs.clblast-root }}
+  clblast-include-dir:
+    description: 'Directory containing clblast_c.h'
+    value: ${{ steps.collect.outputs.clblast-include-dir }}
+  clblast-library:
+    description: 'Full path to the CLBlast library'
+    value: ${{ steps.collect.outputs.clblast-library }}
+  clblast-version:
+    description: 'CLBlast version actually installed'
+    value: ${{ steps.collect.outputs.clblast-version }}
+  source-used:
+    description: 'Where CLBlast came from: package or build'
+    value: ${{ steps.collect.outputs.source-used }}
+  verify-status:
+    description: 'Result of the GEMM check: ok, wrong-result, no-platform, no-device, or a gemm-status-N code. "skipped" when verify is false'
+    value: ${{ steps.check.outputs.verify-status }}
+  max-abs-error:
+    description: 'Largest absolute difference between the device GEMM and a host reference. Zero is the correct value, not a missing one'
+    value: ${{ steps.check.outputs.max-abs-error }}
+
+runs:
+  using: 'composite'
+  steps:
+    # The runner does not enforce input contracts (actions/runner#1070) and
+    # inputs have no type (actions/runner#2238), so validate by hand.
+    - name: Validate inputs and resolve the source
+      id: resolve
+      shell: bash
+      env:
+        SC_VERSION: ${{ inputs.version }}
+        SC_SOURCE: ${{ inputs.source }}
+        SC_VERIFY: ${{ inputs.verify }}
+        SC_CACHE: ${{ inputs.cache }}
+        SC_OS: ${{ runner.os }}
+        SC_ARCH: ${{ runner.arch }}
+      run: |
+        set -euo pipefail
+
+        # Pinned default. update-clblast.yml opens a PR when upstream cuts a
+        # newer release and refreshes the paired commit SHA alongside it.
+        DEFAULT_VERSION='1.7.0'
+        DEFAULT_COMMIT='ca2fc3cb09d4917cc72d4ca661d30296865a4afc'
+
+        case "${SC_SOURCE}" in
+          auto|package|build) ;;
+          *)
+            echo "::error::Unknown source '${SC_SOURCE}'"
+            echo "Valid values are: auto, package, build."
+            exit 1
+            ;;
+        esac
+
+        for name in SC_VERIFY SC_CACHE; do
+          value="${!name}"
+          if [ "${value}" != "true" ] && [ "${value}" != "false" ]; then
+            echo "::error::Input ${name#SC_} must be \"true\" or \"false\", got '${value}'"
+            exit 1
+          fi
+        done
+
+        if [ "${SC_OS}" = "Windows" ] && [ "${SC_ARCH}" = "ARM64" ]; then
+          echo "::error::CLBlast has no prebuilt Windows ARM64 release"
+          echo "Upstream publishes CLBlast-<version>-windows-x64 only, and setup-opencl already rejects Windows on ARM64 because no OpenCL CPU runtime exists there. Use an x64 Windows runner."
+          exit 1
+        fi
+
+        # A source build needs a C compiler on every OS, and cmake and git on
+        # the two that build. Checked here, in the first step of the
+        # composite, so a container without a toolchain fails in seconds
+        # rather than after a full apt-get run.
+        if [ "${SC_OS}" != "Windows" ] && ! command -v cc >/dev/null 2>&1; then
+          echo "::error::No C compiler ('cc') found on PATH"
+          echo "The verify step compiles a GEMM against the installed library. Install a compiler before this step: 'build-essential' on Debian-family Linux, or the Xcode Command Line Tools on macOS ('xcode-select --install')."
+          exit 1
+        fi
+
+        resolved="${SC_SOURCE}"
+        if [ "${resolved}" = "auto" ]; then
+          case "${SC_OS}" in
+            Linux)   resolved="package" ;;
+            macOS)   resolved="build"   ;;
+            Windows) resolved="package" ;;
+            *)
+              echo "::error::Unsupported runner OS '${SC_OS}'"
+              echo "This action supports Linux, macOS, and Windows."
+              exit 1
+              ;;
+          esac
+        fi
+
+        # Validate the resolved value, never the raw 'auto', so this catches
+        # an explicit mismatched source and an auto-resolved one alike.
+        if [ "${SC_OS}" = "macOS" ] && [ "${resolved}" = "package" ]; then
+          echo "::error::source 'package' is not available on macOS"
+          echo "Homebrew's clblast bottle links /System/Library/Frameworks/OpenCL.framework and segfaults when loaded alongside the Khronos ICD loader that setup-opencl installs. macOS requires a source build. Use 'source: build', or leave 'source' as 'auto'."
+          exit 1
+        fi
+        if [ "${SC_OS}" = "Windows" ] && [ "${resolved}" = "build" ]; then
+          echo "::error::source 'build' is not available on Windows"
+          echo "Upstream already publishes a Windows binary for the newest release, so a source build buys nothing and costs an MSVC configure. Use 'source: package', or leave 'source' as 'auto'."
+          exit 1
+        fi
+
+        version="${SC_VERSION}"
+        commit=""
+        if [ -z "${version}" ]; then
+          version="${DEFAULT_VERSION}"
+          commit="${DEFAULT_COMMIT}"
+        elif [ "${version}" = "${DEFAULT_VERSION}" ]; then
+          commit="${DEFAULT_COMMIT}"
+        fi
+
+        if [ -n "${SC_VERSION}" ] && [ "${SC_OS}" = "Linux" ] && [ "${resolved}" = "package" ]; then
+          echo "::warning::The 'version' input is not honored for a Linux package install; apt supplies whatever libclblast-dev the runner's suite ships. Use 'source: build' to pin a version."
+        fi
+
+        echo "resolved-source=${resolved}"  >> "$GITHUB_OUTPUT"
+        echo "resolved-version=${version}"  >> "$GITHUB_OUTPUT"
+        echo "resolved-commit=${commit}"    >> "$GITHUB_OUTPUT"
+
+        # The env context excludes variables inherited by the runner process,
+        # so ${{ env.ImageVersion }} expands to the empty string and would
+        # silently produce a cache key that never invalidates. Compute it here
+        # and expose it as a step output rather than writing it to GITHUB_ENV,
+        # which would leak into the caller's job environment.
+        echo "image-os-version=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+        # hashFiles() only sees files under github.workspace, never
+        # github.action_path, so the build inputs' hash is computed here.
+        # Both scripts are in the key: a change to either changes what lands
+        # in the cached tree.
+        hash_of() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$1" | cut -d' ' -f1
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$1" | cut -d' ' -f1
+          else
+            cksum "$1" | cut -d' ' -f1
+          fi
+        }
+        script_hash="$(
+          { hash_of "${GITHUB_ACTION_PATH}/scripts/build-clblast.sh"
+            hash_of "${GITHUB_ACTION_PATH}/scripts/install-macos.sh"
+          } | tr -d '\n'
+        )"
+        echo "script-hash=${script_hash}" >> "$GITHUB_OUTPUT"
+
+        # The built dylib's install name and its CLBlastConfig.cmake both
+        # bake in the OpenCL loader path, so a cache entry is only valid for
+        # the loader it was built against. Fold the loader path into the key.
+        loader_id="$(printf '%s' "${OpenCL_LIBRARY:-none}" | tr -c 'A-Za-z0-9._-' '-')"
+        echo "loader-id=${loader_id}" >> "$GITHUB_OUTPUT"
+
+    - name: Confirm setup-opencl ran
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -z "${OpenCL_ROOT:-}" ] || [ -z "${OpenCL_LIBRARY:-}" ]; then
+          echo "::error::OpenCL_ROOT or OpenCL_LIBRARY is not set in the job environment"
+          echo "setup-clblast links against the ICD loader that setup-opencl installed and refuses to guess which one. Add 'uses: coatless-actions/setup-opencl@v1' before this step."
+          exit 1
+        fi
+
+    # Only macOS builds from source and is therefore worth caching. A Linux
+    # apt install and a Windows archive extraction are fast enough that the
+    # cache round-trip would not pay for itself.
+    - name: Restore the CLBlast build cache
+      if: runner.os == 'macOS' && inputs.cache == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/clblast
+        key: clblast-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.image-os-version }}-${{ steps.resolve.outputs.resolved-version }}-${{ steps.resolve.outputs.loader-id }}-${{ steps.resolve.outputs.script-hash }}
+
+    - name: Install CLBlast
+      id: install
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        SC_SOURCE: ${{ steps.resolve.outputs.resolved-source }}
+        SC_VERSION: ${{ steps.resolve.outputs.resolved-version }}
+        SC_COMMIT: ${{ steps.resolve.outputs.resolved-commit }}
+        SC_PREFIX: ${{ runner.temp }}/clblast
+      run: |
+        set -euo pipefail
+        case "${RUNNER_OS}" in
+          Linux) script="install-linux.sh" ;;
+          macOS) script="install-macos.sh" ;;
+          *)
+            echo "::error::No install script for runner OS '${RUNNER_OS}'"
+            exit 1
+            ;;
+        esac
+        # The install scripts also print package-manager and cmake chatter to
+        # stdout alongside their key=value contract, so only lines that look
+        # like a well-formed key=value pair are safe to forward to
+        # GITHUB_OUTPUT. This pattern -- rather than a fixed list of key names
+        # -- is what lets a future install script add new keys without them
+        # being silently dropped here.
+        output="$(bash "${GITHUB_ACTION_PATH}/scripts/${script}")"
+        printf '%s\n' "${output}"
+        printf '%s\n' "${output}" | grep -E '^[a-z][a-z0-9-]*=' >> "$GITHUB_OUTPUT"
+
+    # Merges the per-OS install outputs into one canonical set. This is a
+    # shell step, not a ${{ a || b }} expression, because Actions' || is
+    # truthiness based: a legitimate '0' or 'false' would be discarded.
+    # install-windows is wired in by Task 6; until then its outputs are all
+    # unset and the WIN side resolves to empty strings.
+    - name: Collect install results
+      id: collect
+      shell: bash
+      env:
+        SC_NIX_ROOT: ${{ steps.install.outputs.clblast-root }}
+        SC_WIN_ROOT: ${{ steps.install-windows.outputs.clblast-root }}
+        SC_NIX_INCLUDE: ${{ steps.install.outputs.clblast-include-dir }}
+        SC_WIN_INCLUDE: ${{ steps.install-windows.outputs.clblast-include-dir }}
+        SC_NIX_LIBRARY: ${{ steps.install.outputs.clblast-library }}
+        SC_WIN_LIBRARY: ${{ steps.install-windows.outputs.clblast-library }}
+        SC_NIX_CPPFLAGS: ${{ steps.install.outputs.clblast-cppflags }}
+        SC_WIN_CPPFLAGS: ${{ steps.install-windows.outputs.clblast-cppflags }}
+        SC_NIX_LIBS: ${{ steps.install.outputs.clblast-libs }}
+        SC_WIN_LIBS: ${{ steps.install-windows.outputs.clblast-libs }}
+        SC_NIX_CMAKE_DIR: ${{ steps.install.outputs.clblast-cmake-dir }}
+        SC_WIN_CMAKE_DIR: ${{ steps.install-windows.outputs.clblast-cmake-dir }}
+        SC_NIX_PKGCONFIG_DIR: ${{ steps.install.outputs.clblast-pkgconfig-dir }}
+        SC_WIN_PKGCONFIG_DIR: ''
+        SC_NIX_BIN_DIR: ''
+        SC_WIN_BIN_DIR: ${{ steps.install-windows.outputs.clblast-bin-dir }}
+        SC_NIX_VERSION: ${{ steps.install.outputs.clblast-version }}
+        SC_WIN_VERSION: ${{ steps.install-windows.outputs.clblast-version }}
+        SC_NIX_SOURCE_USED: ${{ steps.install.outputs.source-used }}
+        SC_WIN_SOURCE_USED: ${{ steps.install-windows.outputs.source-used }}
+      run: |
+        set -euo pipefail
+
+        if [ "${RUNNER_OS}" = "Windows" ]; then side="WIN"; else side="NIX"; fi
+
+        for pair in ROOT:clblast-root INCLUDE:clblast-include-dir \
+                    LIBRARY:clblast-library CPPFLAGS:clblast-cppflags \
+                    LIBS:clblast-libs CMAKE_DIR:clblast-cmake-dir \
+                    PKGCONFIG_DIR:clblast-pkgconfig-dir BIN_DIR:clblast-bin-dir \
+                    VERSION:clblast-version SOURCE_USED:source-used; do
+          key="${pair%%:*}"
+          outname="${pair#*:}"
+          var="SC_${side}_${key}"
+          printf '%s=%s\n' "${outname}" "${!var-}"
+        done >> "$GITHUB_OUTPUT"
+
+    # Decision 1 (docs/plans/2026-07-21-setup-clblast.md): Ubuntu ships
+    # CLBlast 1.6.2 via apt, which carries a real GEMM correctness bug fixed
+    # upstream in 1.6.3 ("Fixed a bug in the GEMMK=1 kernel (with 2D register
+    # tiling) when MWG!=NWG"). The verify step below cannot be used as the
+    # tiebreaker: every runner this action supports exposes a CPU OpenCL
+    # device, and CLBlast's CPU/default tuning entries for every precision
+    # are all GEMMK=0, the unaffected kernel -- so the GEMM check passes on
+    # 1.6.2 regardless, and that is not evidence the bug is absent. This
+    # action ships the old version anyway (paying for a source build on the
+    # most common Linux runner to dodge a bug that runner cannot reach is a
+    # bad trade) but says so out loud rather than staying silent.
+    # install-linux.sh deliberately does not emit this warning itself -- it
+    # never sees 'auto' -- so it is checked here against whatever version was
+    # actually installed, on any OS and any source.
+    - name: Warn about CLBlast versions with a known GEMM bug
+      shell: bash
+      env:
+        SC_INSTALLED_VERSION: ${{ steps.collect.outputs.clblast-version }}
+      run: |
+        set -euo pipefail
+
+        # Plain dotted-numeric comparison: 'sort -V' is not available in
+        # macOS's default BSD 'sort', so this is done by hand instead.
+        # Returns success (0) when the first version is older than the
+        # second, comparing major.minor.patch left to right.
+        version_older_than() {
+          local -a left right
+          IFS='.' read -r -a left <<< "$1"
+          IFS='.' read -r -a right <<< "$2"
+          local i l r
+          for i in 0 1 2; do
+            l="${left[i]:-0}"
+            r="${right[i]:-0}"
+            l="${l//[!0-9]/}"
+            r="${r//[!0-9]/}"
+            l="${l:-0}"
+            r="${r:-0}"
+            if [ "${l}" -lt "${r}" ]; then return 0; fi
+            if [ "${l}" -gt "${r}" ]; then return 1; fi
+          done
+          return 1
+        }
+
+        if [ -n "${SC_INSTALLED_VERSION}" ] && version_older_than "${SC_INSTALLED_VERSION}" "1.6.3"; then
+          echo "::warning::Installed CLBlast ${SC_INSTALLED_VERSION} predates 1.6.3, which fixed a GEMM correctness bug in the GEMMK=1 kernel (2D register tiling) when MWG != NWG. Proceeding deliberately, not failing: this runner's OpenCL device is a CPU, and CLBlast's CPU tuning defaults are unaffected (GEMMK=0), so the bug is not reachable here -- but the installed library does still carry it. Use 'source: build' to install a version with the fix if your workload needs the guarantee."
+        fi
+
+    - name: Export the CLBlast environment
+      shell: bash
+      env:
+        SC_CPPFLAGS: ${{ steps.collect.outputs.clblast-cppflags }}
+        SC_LIBS: ${{ steps.collect.outputs.clblast-libs }}
+        SC_ROOT: ${{ steps.collect.outputs.clblast-root }}
+        SC_CMAKE_DIR: ${{ steps.collect.outputs.clblast-cmake-dir }}
+        SC_PKGCONFIG_DIR: ${{ steps.collect.outputs.clblast-pkgconfig-dir }}
+        SC_BIN_DIR: ${{ steps.collect.outputs.clblast-bin-dir }}
+      run: |
+        set -euo pipefail
+
+        # Idempotent: a caller's explicit setting always wins. A silent skip
+        # would let a stale value inherited from an earlier step steer this
+        # job's build with no trace of why, so name the variable.
+        set_env() {
+          if [ -z "${!1+set}" ]; then
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_ENV"
+          else
+            echo "::notice::${1} is already set; keeping the caller's existing value instead of exporting the action's"
+          fi
+        }
+
+        set_env CLBLAST_CPPFLAGS "${SC_CPPFLAGS}"
+        set_env CLBLAST_LIBS     "${SC_LIBS}"
+        set_env CLBlast_ROOT     "${SC_ROOT}"
+
+        # CLBlast ships no CLBlastConfigVersion.cmake in any channel, so
+        # find_package(CLBlast <version>) fails everywhere and only the
+        # version-less form works. CLBlast_DIR must point at the directory
+        # holding CLBlastConfig.cmake, not at the install prefix.
+        if [ -n "${SC_CMAKE_DIR}" ] && [ -e "${SC_CMAKE_DIR}/CLBlastConfig.cmake" ]; then
+          set_env CLBlast_DIR "${SC_CMAKE_DIR}"
+        else
+          echo "::warning::No CLBlastConfig.cmake found under '${SC_CMAKE_DIR}'; CLBlast_DIR was not exported and find_package(CLBlast) will not work in this job"
+        fi
+
+        # PKG_CONFIG_PATH is prepended, not set idempotently: it is a search
+        # path a caller legitimately accumulates entries in, so the
+        # caller-wins rule that governs the scalar variables above does not
+        # apply. Windows has no pkg-config file at all (upstream gates its
+        # generation on `if(UNIX OR MINGW)`), so this is skipped there.
+        if [ -n "${SC_PKGCONFIG_DIR}" ] && [ -e "${SC_PKGCONFIG_DIR}/clblast.pc" ]; then
+          printf 'PKG_CONFIG_PATH=%s%s\n' \
+            "${SC_PKGCONFIG_DIR}" \
+            "${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}" >> "$GITHUB_ENV"
+        fi
+
+        # Exactly one CLBlast bin directory on PATH. GITHUB_PATH prepends, so
+        # adding a second would silently shadow the DLL the build linked
+        # against. Only Windows has one -- on Linux and macOS the loader
+        # finds the shared library through its absolute install name or the
+        # standard library path.
+        if [ -n "${SC_BIN_DIR}" ]; then
+          printf '%s\n' "${SC_BIN_DIR}" >> "$GITHUB_PATH"
+        fi
+
+    - name: Verify a GEMM on the installed library
+      id: check
+      shell: bash
+      env:
+        SC_VERIFY: ${{ inputs.verify }}
+      run: |
+        set -euo pipefail
+
+        if [ "${SC_VERIFY}" != "true" ]; then
+          echo "::notice::Skipping the GEMM check because 'verify' is false"
+          {
+            printf 'verify-status=skipped\n'
+            printf 'max-abs-error=\n'
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # 'cc' is absent on Windows runners, which ship mingw 'gcc' on PATH.
+        compiler="cc"
+        command -v cc >/dev/null 2>&1 || compiler="gcc"
+
+        check_dir="$(mktemp -d)"
+        # shellcheck disable=SC2086
+        "${compiler}" -O2 -o "${check_dir}/verify" \
+          "${GITHUB_ACTION_PATH}/scripts/verify-gemm.c" \
+          ${CLBLAST_CPPFLAGS} ${OPENCL_CPPFLAGS} \
+          ${CLBLAST_LIBS} ${OPENCL_LIBS} -lm
+
+        set +e
+        output="$("${check_dir}/verify")"
+        rc=$?
+        set -e
+        printf '%s\n' "${output}"
+
+        status="$(printf '%s\n' "${output}" | sed -n 's/^verify-status=//p')"
+        if [ -z "${status}" ]; then
+          echo "::error::The GEMM check produced no verify-status line"
+          echo "The verifier crashed before printing its contract. On macOS this is the signature of a CLBlast linked against Apple's OpenCL.framework being loaded alongside the Khronos loader."
+          exit 1
+        fi
+
+        printf '%s\n' "${output}" | grep -E '^[a-z][a-z0-9-]*=' >> "$GITHUB_OUTPUT"
+
+        # Exit code 2 means there was no OpenCL device to test on. That is a
+        # setup-opencl concern, not a CLBlast defect, and setup-opencl already
+        # fails the job for it unless the caller explicitly asked for no
+        # device. Do not fail twice for the same condition.
+        if [ "${rc}" -eq 2 ]; then
+          echo "::warning::No OpenCL device is present, so the GEMM check could not run. CLBlast was installed but has not been exercised."
+          exit 0
+        fi
+
+        if [ "${rc}" -ne 0 ]; then
+          echo "::error::The installed CLBlast produced an incorrect GEMM (verify-status=${status})"
+          echo "This is a real numerical failure, not a link error -- CLBlastSgemm can return success while leaving the output buffer garbage. On macOS check that SDKROOT is exported (PoCL's runtime kernel link needs it) and that setup-opencl ran before this step. On Linux check that no second CLBlast is ahead of this one on the link line. Set 'verify' to 'false' only if you accept an unverified library."
+          exit 1
+        fi
