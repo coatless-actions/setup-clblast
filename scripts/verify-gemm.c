@@ -26,16 +26,16 @@
 
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 #include <CL/cl.h>
 #include <clblast_c.h>
 
 #define N 64
 #define TOLERANCE 1e-3
 
-/* Reported and exited-with when there is no device at all. Distinct from a
- * wrong answer: the action treats "nothing to test" and "tested and wrong"
- * differently, exactly as setup-opencl distinguishes device-count 0 from a
- * failed probe. */
+/* Exit codes are part of the contract action.yml branches on: 0 only for
+ * ok, 2 only when there was nothing to test on, 1 for every other status
+ * (a real failure: setup broke, or the answer is wrong). */
 #define EXIT_NOTHING_TO_TEST 2
 
 static float a[N * N];
@@ -43,11 +43,18 @@ static float b[N * N];
 static float c[N * N];
 static float ref[N * N];
 
+/* Prints the two-line contract and returns the exit code that matches the
+ * given status: 2 for "no-platform"/"no-device" (nothing to test on), 1 for
+ * every other status (a real failure). */
 static int bail(const char *status)
 {
     printf("max-abs-error=nan\n");
     printf("verify-status=%s\n", status);
-    return EXIT_NOTHING_TO_TEST;
+    if (strcmp(status, "no-platform") == 0 || strcmp(status, "no-device") == 0)
+    {
+        return EXIT_NOTHING_TO_TEST;
+    }
+    return 1;
 }
 
 int main(void)
