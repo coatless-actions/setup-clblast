@@ -193,6 +193,14 @@ runs:
     # Only macOS builds from source and is therefore worth caching. A Linux
     # apt install and a Windows archive extraction are fast enough that the
     # cache round-trip would not pay for itself.
+    #
+    # Measured on macos-latest, run 29892787040 (2026-07-22): the 'Install
+    # CLBlast' step took ~29s wall on the cache: false leg (a cold build
+    # every run) and ~64s wall on the cache: true leg's first, cache-miss
+    # run. Both are comfortably under the three-minute figure that would
+    # mean -DTUNERS=OFF stopped taking effect, and both are in line with
+    # the 30-60s projected from a 14-18s local measurement on faster
+    # hardware. A cache hit on a later run pays none of this.
     - name: Restore the CLBlast build cache
       if: runner.os == 'macOS' && inputs.cache == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
