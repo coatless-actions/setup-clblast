@@ -253,12 +253,22 @@ runs:
     # mean -DTUNERS=OFF stopped taking effect, and both are in line with
     # the 30-60s projected from a 14-18s local measurement on faster
     # hardware. A cache hit on a later run pays none of this.
+    # The key includes resolved-commit as well as resolved-version: a hit on
+    # a key that omits the commit would never be re-saved by actions/cache
+    # (it only saves after a miss), so re-pinning the default version's
+    # commit without also bumping the version -- exactly what
+    # upstream-update.yml does for a point release upstream re-tags -- would
+    # otherwise serve the old binary under the new commit's identity forever.
+    # The stamp inside install-macos.sh already catches this at the file
+    # level (the tree is rebuilt), but only after paying the full restore +
+    # discard + rebuild cost on every single run with no cache ever winning;
+    # putting the commit in the key lets a genuine cache hit stay a hit.
     - name: Restore the CLBlast build cache
       if: runner.os == 'macOS' && inputs.cache == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/clblast
-        key: clblast-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.image-os-version }}-${{ steps.resolve.outputs.resolved-version }}-${{ steps.resolve.outputs.loader-id }}-${{ steps.resolve.outputs.script-hash }}
+        key: clblast-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve.outputs.image-os-version }}-${{ steps.resolve.outputs.resolved-version }}-${{ steps.resolve.outputs.resolved-commit }}-${{ steps.resolve.outputs.loader-id }}-${{ steps.resolve.outputs.script-hash }}
 
     - name: Install CLBlast
       id: install
