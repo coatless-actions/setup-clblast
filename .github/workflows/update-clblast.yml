@@ -1,0 +1,187 @@
+name: Update CLBlast
+
+on:
+  schedule:
+    - cron: '25 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Look up the newest CLBlast release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release="$(gh api repos/CNugteren/CLBlast/releases \
+            --jq '[.[] | select(.prerelease == false and .draft == false)][0]')"
+          tag="$(printf '%s' "${release}" | jq -r '.tag_name')"
+          digest="$(printf '%s' "${release}" \
+            | jq -r '[.assets[] | select(.name | test("indows-x64")) | .digest] | first')"
+
+          if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
+            echo "::error::Could not determine the newest CLBlast release"
+            echo "The CNugteren/CLBlast release listing returned no non-draft, non-prerelease entry; the repository's release process may have changed."
+            exit 1
+          fi
+
+          # A new release with no published SHA-256 cannot become the default:
+          # install-windows.ps1 refuses any Windows archive with nothing to
+          # verify it against, so opening a PR that green-lights this version
+          # would produce a PR that fails every Windows leg. Fail here
+          # instead of opening it.
+          case "${digest}" in
+            sha256:*) sha256="${digest#sha256:}" ;;
+            *)
+              echo "::error::CLBlast release '${tag}' publishes no SHA-256 digest for its Windows asset"
+              echo "install-windows.ps1 refuses unverifiable downloads, so this release cannot become the default until its digest is computed out of band (download the asset and run 'shasum -a 256' on it) and added to \$KnownDigests in scripts/install-windows.ps1 by hand."
+              exit 1
+              ;;
+          esac
+
+          commit="$(gh api "repos/CNugteren/CLBlast/commits/${tag}" --jq '.sha')"
+          if [ -z "${commit}" ] || [ "${commit}" = "null" ]; then
+            echo "::error::Could not resolve tag '${tag}' to a commit SHA"
+            echo "The GitHub API returned no .sha for repos/CNugteren/CLBlast/commits/${tag}. Check that the tag still exists at https://github.com/CNugteren/CLBlast/tags."
+            exit 1
+          fi
+
+          {
+            echo "tag=${tag}"
+            echo "commit=${commit}"
+            echo "sha256=${sha256}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update the pinned release
+        id: bump
+        env:
+          SC_TAG: ${{ steps.latest.outputs.tag }}
+          SC_COMMIT: ${{ steps.latest.outputs.commit }}
+          SC_SHA256: ${{ steps.latest.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Escaped once, used everywhere below a version string is matched as
+          # part of a sed pattern rather than substituted into a replacement:
+          # '.' is a regex metacharacter and version tags are dotted-numeric.
+          esc_tag="$(printf '%s' "${SC_TAG}" | sed 's/[.[\*^$]/\\&/g')"
+
+          current="$(sed -n "s/^ *DEFAULT_VERSION='\(.*\)'/\1/p" action.yml | head -1)"
+          if [ "${current}" = "${SC_TAG}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Already on ${SC_TAG}"
+            exit 0
+          fi
+
+          sed -i "s|^\( *\)DEFAULT_VERSION='.*'|\1DEFAULT_VERSION='${SC_TAG}'|" action.yml
+          sed -i "s|^\( *\)DEFAULT_COMMIT='.*'|\1DEFAULT_COMMIT='${SC_COMMIT}'|" action.yml
+          sed -i "s|^\(\$DefaultVersion *= *\)'.*'|\1'${SC_TAG}'|" scripts/install-windows.ps1
+
+          # Add the new version as a new row in the digest table rather than
+          # replacing the table: older entries stay valid and stay supported,
+          # per Decision 2 in the design (Windows versions predating 1.7.0 are
+          # only usable through this hand-maintained table). The address
+          # '0,/regex/' plus an empty 's//../' pattern (GNU sed reuses the
+          # last regex) rewrites only the FIRST line matching
+          # '$KnownDigests = @{' -- inserting the new row right after it --
+          # rather than every such line, in case the pattern ever recurs.
+          sed -i "0,/^\\\$KnownDigests = @{\$/s//&\n    '${SC_TAG}' = '${SC_SHA256}'/" scripts/install-windows.ps1
+
+          # A sed that matches nothing is silent, and a bump workflow that
+          # reports success while changing nothing is worse than one that
+          # fails -- so every rewrite above is re-read back from disk and
+          # compared against what was intended, not merely grepped for.
+          after_version="$(sed -n "s/^ *DEFAULT_VERSION='\(.*\)'/\1/p" action.yml | head -1)"
+          if [ "${after_version}" != "${SC_TAG}" ]; then
+            echo "::error::DEFAULT_VERSION in action.yml reads '${after_version}' after the rewrite, expected '${SC_TAG}'"
+            echo "The pinned-defaults block's formatting in action.yml has changed; update the sed pattern in .github/workflows/update-clblast.yml to match it."
+            exit 1
+          fi
+
+          after_commit="$(sed -n "s/^ *DEFAULT_COMMIT='\(.*\)'/\1/p" action.yml | head -1)"
+          if [ "${after_commit}" != "${SC_COMMIT}" ]; then
+            echo "::error::DEFAULT_COMMIT in action.yml reads '${after_commit}' after the rewrite, expected '${SC_COMMIT}'"
+            echo "The pinned-defaults block's formatting in action.yml has changed; update the sed pattern in .github/workflows/update-clblast.yml to match it."
+            exit 1
+          fi
+
+          after_default="$(sed -n "s/^\\\$DefaultVersion *= *'\(.*\)'/\1/p" scripts/install-windows.ps1 | head -1)"
+          if [ "${after_default}" != "${SC_TAG}" ]; then
+            echo "::error::\$DefaultVersion in scripts/install-windows.ps1 reads '${after_default}' after the rewrite, expected '${SC_TAG}'"
+            echo "The \$DefaultVersion assignment's formatting in scripts/install-windows.ps1 has changed; update the sed pattern in .github/workflows/update-clblast.yml to match it."
+            exit 1
+          fi
+
+          after_digest="$(sed -n "s/^ *'${esc_tag}' = '\([0-9a-f]\{64\}\)'\$/\1/p" scripts/install-windows.ps1 | head -1)"
+          if [ "${after_digest}" != "${SC_SHA256}" ]; then
+            echo "::error::\$KnownDigests in scripts/install-windows.ps1 has no row '${SC_TAG}' = '${SC_SHA256}' after the rewrite (found '${after_digest}')"
+            echo "The \$KnownDigests table's formatting in scripts/install-windows.ps1 has changed; update the sed pattern in .github/workflows/update-clblast.yml to match it. Version and digest must move together: do not open a PR that bumps the version without a matching digest row."
+            exit 1
+          fi
+
+          echo "changed=true"        >> "$GITHUB_OUTPUT"
+          echo "previous=${current}" >> "$GITHUB_OUTPUT"
+
+      - name: Write the pull request body
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          SC_TAG: ${{ steps.latest.outputs.tag }}
+          SC_PREVIOUS: ${{ steps.bump.outputs.previous }}
+          SC_COMMIT: ${{ steps.latest.outputs.commit }}
+          SC_SHA256: ${{ steps.latest.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # create-pull-request commits every untracked file in the workspace
+          # by default, so the body is written under RUNNER_TEMP rather than
+          # the checkout -- writing it to the repo root would ship the body
+          # file itself as an added file in the pull request it describes.
+          #
+          # Built with printf, one line per call, rather than a heredoc: a
+          # heredoc's body is indented to match this script's YAML nesting,
+          # and without '<<-' (which only strips leading TABS, not spaces)
+          # every line would carry that indentation into the file -- four or
+          # more leading spaces reads as a Markdown code block.
+          body_file="${RUNNER_TEMP}/clblast-bump-pr-body.md"
+          {
+            printf 'Upstream published `%s`, replacing `%s`.\n\n' "${SC_TAG}" "${SC_PREVIOUS}"
+            printf 'Commit: `%s`\n' "${SC_COMMIT}"
+            printf 'Windows asset SHA-256: `%s`\n\n' "${SC_SHA256}"
+            printf 'This moves `DEFAULT_VERSION`/`DEFAULT_COMMIT` in `action.yml` and\n'
+            printf '`$DefaultVersion`/`$KnownDigests` in `scripts/install-windows.ps1`\n'
+            printf 'together, so the Windows install path stays verifiable against a\n'
+            printf 'pinned SHA-256 at the new version.\n\n'
+            printf 'Checks do not run automatically on this pull request. It is opened\n'
+            printf 'with the default `GITHUB_TOKEN`, and GitHub Actions does not\n'
+            printf 'trigger `pull_request` or `push` workflows from a branch pushed\n'
+            printf 'with that token. Before merging, either close and reopen this pull\n'
+            printf 'request to fire `Test`, or run it by hand with\n'
+            printf '`gh workflow run Test --ref update-clblast-release` (or the\n'
+            printf '"Run workflow" button on the `Test` workflow) -- and in\n'
+            printf 'particular confirm the macOS and Windows legs still report\n'
+            printf '`verify-status=ok`.\n'
+          } > "${body_file}"
+
+      - name: Open a pull request
+        if: steps.bump.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: 'Move the pinned CLBlast release to ${{ steps.latest.outputs.tag }}'
+          title: 'Move the pinned CLBlast release to ${{ steps.latest.outputs.tag }}'
+          body-path: ${{ runner.temp }}/clblast-bump-pr-body.md
+          branch: update-clblast-release
+          delete-branch: true
