@@ -1,0 +1,148 @@
+name: Test
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '55 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Rapid pushes to an open pull request should not queue up multiple matrices
+# behind each other. The default branch is excluded from cancellation: a push
+# there can land between a scheduled run and a workflow_dispatch run, and
+# neither should be cut short by the other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+
+jobs:
+  test:
+    name: ${{ matrix.source }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Tier 1: generally available runner labels. These must stay green.
+          - { os: ubuntu-24.04,     source: auto,    expect-source: package, expect-version: '1.6.2' }
+          - { os: ubuntu-24.04-arm, source: auto,    expect-source: package, expect-version: '1.6.2' }
+          - { os: ubuntu-24.04,     source: build,   expect-source: build,   expect-version: '1.7.0' }
+          - { os: macos-latest,     source: auto,    expect-source: build,   expect-version: '1.7.0' }
+          # cache: false has no coverage otherwise -- every leg above takes
+          # the action's default 'true' and so never exercises the other
+          # branch of its own `if: ... && inputs.cache == 'true'` gate.
+          - { os: macos-latest,     source: build,   expect-source: build,   expect-version: '1.7.0', cache: 'false' }
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Set up CLBlast
+        id: setup
+        uses: ./
+        with:
+          source: ${{ matrix.source }}
+          cache: ${{ matrix.cache || 'true' }}
+
+      - name: Confirm the action reported a correct GEMM
+        shell: bash
+        env:
+          SC_EXPECT_SOURCE: ${{ matrix.expect-source }}
+          SC_EXPECT_VERSION: ${{ matrix.expect-version }}
+          SC_SOURCE_USED: ${{ steps.setup.outputs.source-used }}
+          SC_VERSION: ${{ steps.setup.outputs.clblast-version }}
+          SC_STATUS: ${{ steps.setup.outputs.verify-status }}
+          SC_ERROR: ${{ steps.setup.outputs.max-abs-error }}
+          SC_ROOT: ${{ steps.setup.outputs.clblast-root }}
+          SC_LIBRARY: ${{ steps.setup.outputs.clblast-library }}
+        run: |
+          set -euo pipefail
+
+          echo "source-used    = ${SC_SOURCE_USED}"
+          echo "clblast-version= ${SC_VERSION}"
+          echo "verify-status  = ${SC_STATUS}"
+          echo "max-abs-error  = ${SC_ERROR}"
+          echo "clblast-root   = ${SC_ROOT}"
+          echo "clblast-library= ${SC_LIBRARY}"
+
+          if [ "${SC_SOURCE_USED}" != "${SC_EXPECT_SOURCE}" ]; then
+            echo "::error::Expected source-used '${SC_EXPECT_SOURCE}', got '${SC_SOURCE_USED}'"
+            exit 1
+          fi
+          if [ "${SC_VERSION}" != "${SC_EXPECT_VERSION}" ]; then
+            echo "::error::Expected clblast-version '${SC_EXPECT_VERSION}', got '${SC_VERSION}'"
+            exit 1
+          fi
+          if [ "${SC_STATUS}" != "ok" ]; then
+            echo "::error::Expected verify-status 'ok', got '${SC_STATUS}'"
+            exit 1
+          fi
+          # max-abs-error is legitimately '0'. Assert it is present and
+          # small, never merely non-empty -- a truthiness test would treat
+          # the correct answer as missing.
+          case "${SC_ERROR}" in
+            ''|*[!0-9.eE+-]*)
+              echo "::error::max-abs-error '${SC_ERROR}' is not a plain number"
+              exit 1
+              ;;
+          esac
+          [ -e "${SC_LIBRARY}" ] || {
+            echo "::error::clblast-library '${SC_LIBRARY}' does not exist"
+            exit 1
+          }
+
+      # Compiles against the exported environment only, with no reference to
+      # the action's internals. This is the contract consumers depend on --
+      # in particular CLBLAST_CPPFLAGS and CLBLAST_LIBS, the two names
+      # RcppBandicoot's configure.win reads verbatim.
+      - name: Build a consumer program using only the exported environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > consumer.c <<'PROGRAM'
+          #define CL_TARGET_OPENCL_VERSION 300
+          #include <stdio.h>
+          #include <CL/cl.h>
+          #include <clblast_c.h>
+          int main(void) {
+              printf("clblast header and library resolved\n");
+              return (CLBlastSgemm == 0);
+          }
+          PROGRAM
+          compiler="cc"
+          command -v cc >/dev/null 2>&1 || compiler="gcc"
+          "${compiler}" -o consumer consumer.c \
+            ${CLBLAST_CPPFLAGS} ${OPENCL_CPPFLAGS} \
+            ${CLBLAST_LIBS} ${OPENCL_LIBS}
+          ./consumer
+
+      # find_package(CLBlast) is the other half of the export contract, and
+      # on Windows it is the half the action has to repair by hand. Prove it
+      # works everywhere rather than only where it happens to be undamaged.
+      - name: Consume the exported CLBlast_DIR from CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cmake-consumer
+          cat > cmake-consumer/CMakeLists.txt <<'PROJECT'
+          cmake_minimum_required(VERSION 3.16)
+          project(clblast_consumer C)
+          # Version-less on purpose: CLBlast ships no CLBlastConfigVersion.cmake
+          # in any channel, so find_package(CLBlast 1.7.0) fails everywhere.
+          # The imported target is lowercase 'clblast', not CLBlast::CLBlast.
+          find_package(CLBlast REQUIRED)
+          add_executable(consumer consumer.c)
+          target_link_libraries(consumer PRIVATE clblast)
+          PROJECT
+          cp consumer.c cmake-consumer/
+          cmake -S cmake-consumer -B cmake-consumer/build
+          cmake --build cmake-consumer/build
