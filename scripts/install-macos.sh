@@ -16,6 +16,15 @@
 # them: a partial restore that satisfies a single-file check would be used
 # as-is and fail later at link or load time, while a gate that is too strict
 # in the other direction would silently rebuild on every run forever.
+#
+# Existing files are necessary but not sufficient. A prefix reused across a
+# different SC_VERSION / SC_COMMIT / OpenCL_ROOT -- a non-ephemeral
+# self-hosted runner, or an actions/cache restore-keys prefix-fallback hit --
+# would still contain every file the gate looks for, just the WRONG ones,
+# and the script would report the newly requested version while shipping the
+# old binary underneath. A stamp file recording exactly what produced the
+# tree closes that gap: the tree is reusable only when the stamp matches
+# everything currently requested.
 
 set -euo pipefail
 
@@ -68,12 +77,31 @@ fi
 # resolves, the unversioned symlink '-lclblast' resolves, the CMake package
 # config, and the pkg-config file. A tree missing any one of them is not a
 # cache hit.
-tree_is_complete() {
+files_complete() {
     [ -e "${prefix}/include/clblast_c.h" ] \
         && [ -e "${prefix}/lib/libclblast.dylib" ] \
         && [ -e "${prefix}/lib/libclblast.1.dylib" ] \
         && [ -e "${prefix}/lib/cmake/CLBlast/CLBlastConfig.cmake" ] \
         && [ -e "${prefix}/lib/pkgconfig/clblast.pc" ]
+}
+
+# Identity stamp, written after a successful build (below). Records exactly
+# what produced the tree at 'prefix': the version, the commit, and the
+# resolved OpenCL inputs that were actually passed to build-clblast.sh. A
+# tree is only a cache hit when every file is present AND this matches
+# everything currently requested -- so a changed version, commit, or
+# OpenCL_ROOT can never be satisfied by an existing tree, even if that tree
+# is otherwise byte-for-byte complete.
+stamp_file="${prefix}/.setup-clblast-stamp"
+stamp_wanted="$(printf 'version=%s\ncommit=%s\nopencl-include=%s\nopencl-library=%s\n' \
+    "${version}" "${commit}" "${opencl_include}" "${opencl_library}")"
+
+stamp_matches() {
+    [ -e "${stamp_file}" ] && [ "$(cat "${stamp_file}")" = "${stamp_wanted}" ]
+}
+
+tree_is_complete() {
+    files_complete && stamp_matches
 }
 
 if ! tree_is_complete; then
@@ -85,13 +113,18 @@ if ! tree_is_complete; then
     SC_OPENCL_LIBRARIES="${opencl_library}" \
         bash "$(dirname "$0")/build-clblast.sh"
 
-    # Re-run the same gate used for the cache decision. Without this, a
-    # layout change that drops one required file would not fail loudly -- it
-    # would make every future run look like a cache miss forever, rebuilding
-    # on every single run with no error.
-    tree_is_complete \
+    # Re-run the file half of the same gate used for the cache decision.
+    # Without this, a layout change that drops one required file would not
+    # fail loudly -- it would make every future run look like a cache miss
+    # forever, rebuilding on every single run with no error.
+    files_complete \
         || die "Installed CLBlast tree at '${prefix}' is missing one of: include/clblast_c.h, lib/libclblast.dylib, lib/libclblast.1.dylib, lib/cmake/CLBlast/CLBlastConfig.cmake, lib/pkgconfig/clblast.pc" \
                "The upstream install layout may have changed for CLBlast ${version}. Check https://github.com/CNugteren/CLBlast/releases/tag/${version}."
+
+    # Only written once the tree is known-complete for exactly this
+    # identity, so a failed or partial build never leaves behind a stamp
+    # that would make the next run trust it.
+    printf '%s' "${stamp_wanted}" > "${stamp_file}"
 fi
 
 emit clblast-root           "${prefix}"
