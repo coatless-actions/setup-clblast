@@ -453,6 +453,17 @@ runs:
       shell: bash
       env:
         SC_VERIFY: ${{ inputs.verify }}
+        # Read from the collect step's own outputs, not from CLBLAST_CPPFLAGS
+        # / CLBLAST_LIBS in the job environment: the export step above
+        # deliberately does not overwrite a caller's pre-existing values
+        # (set_env's caller-wins rule), so a caller who pre-set those, or who
+        # invokes this action twice in one job, would otherwise get a
+        # verify-status describing a different library than the one
+        # clblast-library/clblast-version just reported. OPENCL_CPPFLAGS /
+        # OPENCL_LIBS are exempt from this: they belong to setup-opencl, a
+        # separate action this one does not own or re-export.
+        SC_CLBLAST_CPPFLAGS: ${{ steps.collect.outputs.clblast-cppflags }}
+        SC_CLBLAST_LIBS: ${{ steps.collect.outputs.clblast-libs }}
       run: |
         set -euo pipefail
 
@@ -473,8 +484,8 @@ runs:
         # shellcheck disable=SC2086
         "${compiler}" -O2 -o "${check_dir}/verify" \
           "${GITHUB_ACTION_PATH}/scripts/verify-gemm.c" \
-          ${CLBLAST_CPPFLAGS} ${OPENCL_CPPFLAGS} \
-          ${CLBLAST_LIBS} ${OPENCL_LIBS} -lm
+          ${SC_CLBLAST_CPPFLAGS} ${OPENCL_CPPFLAGS} \
+          ${SC_CLBLAST_LIBS} ${OPENCL_LIBS} -lm
 
         set +e
         output="$("${check_dir}/verify")"
