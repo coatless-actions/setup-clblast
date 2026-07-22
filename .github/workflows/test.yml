@@ -766,3 +766,299 @@ jobs:
               ;;
           esac
           echo "Confirmed: the second run reused the extracted tree and still verified correctly."
+
+  # The action validates and rejects five combinations covered here (a
+  # sixth, a non-boolean verify/cache value, has no dedicated leg -- it is
+  # the same 'case'-style check as the others and shares its mechanism).
+  # Each row below changes exactly one input away from an otherwise-valid
+  # combination, so the resolve step can only reach that row's specific
+  # validation branch. That isolation is necessary but not sufficient:
+  # steps.<id>.outcome only says the action failed, not why, and this
+  # project has already shipped a regression test once that stayed green
+  # while the bug it existed to catch was live. Every row below is
+  # therefore also checked against the literal ::error:: text its own
+  # branch produces, via a second, independent invocation of the failing
+  # code path -- an unrelated breakage (a shell regression elsewhere in the
+  # resolve step, a GitHub API outage on the Windows leg) would fail the
+  # composite step the same way but would not reproduce the specific
+  # message asserted below.
+  reject:
+    name: reject ${{ matrix.reason }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,    reason: unknown-source,    source: bogus,   version: '',      expected-error: "Unknown source 'bogus'" }
+          - { os: macos-latest,    reason: package-on-macos,  source: package, version: '',      expected-error: "source 'package' is not available on macOS" }
+          - { os: windows-2025,    reason: build-on-windows,  source: build,   version: '',      expected-error: "source 'build' is not available on Windows" }
+          - { os: windows-2025,    reason: windows-no-digest, source: auto,    version: '1.6.2', expected-error: 'has no SHA-256 digest' }
+          - { os: windows-11-arm,  reason: windows-arm64,     source: auto,    version: '',      expected-error: 'CLBlast has no prebuilt Windows ARM64 release' }
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      # windows-11-arm is rejected by setup-opencl too, so this leg must not
+      # depend on it. Every other leg reaches the CLBlast action's own
+      # validation before any OpenCL state is needed.
+      - name: Set up OpenCL
+        if: matrix.reason != 'windows-arm64'
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Attempt setup with an invalid combination
+        id: attempt
+        continue-on-error: true
+        uses: ./
+        with:
+          source: ${{ matrix.source }}
+          version: ${{ matrix.version }}
+
+      - name: Confirm the action rejected this combination
+        shell: bash
+        env:
+          SC_OUTCOME: ${{ steps.attempt.outcome }}
+          SC_REASON: ${{ matrix.reason }}
+        run: |
+          set -euo pipefail
+          if [ "${SC_OUTCOME}" != "failure" ]; then
+            echo "::error::Expected the action to reject '${SC_REASON}', but it succeeded"
+            exit 1
+          fi
+          echo "Correctly rejected: ${SC_REASON}"
+
+      # windows-no-digest is the only one of these five legs that fails
+      # inside a real script file (install-windows.ps1's digest lookup)
+      # rather than inside action.yml's own inline resolve step, so it is
+      # checked the same way windows-digest-refusal further below already
+      # does: the script is invoked a second time directly, with the same
+      # inputs, and its captured output is checked for the specific refusal
+      # message rather than just its exit code. A 'uses:' step's own stdout
+      # cannot be piped into a later step, which is why this re-invokes
+      # rather than trying to read the attempt step's own log.
+      - name: Confirm the windows-no-digest rejection is the missing digest, not something else
+        if: matrix.reason == 'windows-no-digest'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SC_VERSION: ${{ matrix.version }}
+        run: |
+          $output = & ./scripts/install-windows.ps1 -Source 'package' -Version $env:SC_VERSION -InstallDir "$env:RUNNER_TEMP\reject-digest-check" 2>&1 | Out-String
+          Write-Output $output
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "::error::Expected scripts/install-windows.ps1 to fail for CLBlast version '$env:SC_VERSION', but it exited 0"
+            exit 1
+          }
+          if ($output -notmatch 'has no SHA-256 digest') {
+            Write-Output "::error::install-windows.ps1 failed, but its output does not contain 'has no SHA-256 digest' -- this could be an unrelated failure rather than proof of the windows-no-digest rejection this leg exists to cover"
+            exit 1
+          }
+          Write-Output "Confirmed: the failure is specifically the missing SHA-256 digest, not an unrelated cause."
+          # install-windows.ps1's own 'exit 1' set $LASTEXITCODE and nothing
+          # above resets it -- GitHub's pwsh runner checks $LASTEXITCODE
+          # after the script body regardless of whether this step's own
+          # logic ever called exit, and would otherwise fail this step for
+          # succeeding at the very thing it was checking for.
+          exit 0
+
+      # The other four legs fail inside action.yml's own inline "Validate
+      # inputs and resolve the source" step, which -- unlike
+      # install-windows.ps1 -- has no separate script file to re-invoke.
+      # Its 'run:' block is therefore extracted verbatim out of action.yml
+      # and executed directly, so this always runs the exact same code the
+      # composite step above just ran. A hand-copied duplicate of that
+      # logic could drift from action.yml over time, or keep matching after
+      # a future change altered what the real step actually does -- either
+      # of which would make this assertion pass for the wrong reason.
+      - name: Confirm the resolve step's rejection reason, not an unrelated failure
+        if: matrix.reason != 'windows-no-digest'
+        shell: bash
+        env:
+          SC_REASON: ${{ matrix.reason }}
+          SC_SOURCE: ${{ matrix.source }}
+          SC_VERSION: ${{ matrix.version }}
+          SC_EXPECTED: ${{ matrix.expected-error }}
+        run: |
+          set -euo pipefail
+
+          # action.yml's resolve step is fixed at exactly this indentation
+          # (verified against the file directly); extraction is column-exact
+          # rather than a generic indentation-guesser, so a reformat of
+          # action.yml fails this loudly (an empty extraction, caught by the
+          # rc-must-be-nonzero check below) instead of silently drifting.
+          # Trailing \r is stripped per line: actions/checkout may check
+          # action.yml out with CRLF endings on Windows, which the real
+          # composite step never sees because the runner's own YAML parser
+          # normalizes line breaks -- this re-invocation reads the file as
+          # plain text instead and must normalize them itself to match.
+          awk '
+            index($0, "    - name: Validate inputs and resolve the source") == 1 { found = 1 }
+            found && index($0, "      run: |") == 1 { inrun = 1; next }
+            inrun {
+              gsub(/\r$/, "")
+              if (index($0, "    - name:") == 1) { exit }
+              print substr($0, 9)
+            }
+          ' action.yml > "${RUNNER_TEMP}/resolve-step.sh"
+
+          set +e
+          actual_output="$(
+            SC_VERSION="${SC_VERSION}" \
+            SC_COMMIT='' \
+            SC_SOURCE="${SC_SOURCE}" \
+            SC_VERIFY='true' \
+            SC_CACHE='true' \
+            SC_OS="${RUNNER_OS}" \
+            SC_ARCH="${RUNNER_ARCH}" \
+            GITHUB_OUTPUT="${RUNNER_TEMP}/resolve-output.txt" \
+            GITHUB_ACTION_PATH="${GITHUB_WORKSPACE}" \
+            bash "${RUNNER_TEMP}/resolve-step.sh" 2>&1
+          )"
+          actual_rc=$?
+          set -e
+
+          printf '%s\n' "${actual_output}"
+
+          if [ "${actual_rc}" -eq 0 ]; then
+            echo "::error::Re-invoking action.yml's resolve step directly for '${SC_REASON}' exited 0; expected a failure containing '${SC_EXPECTED}'"
+            exit 1
+          fi
+
+          case "${actual_output}" in
+            *"${SC_EXPECTED}"*) ;;
+            *)
+              echo "::error::The '${SC_REASON}' rejection's output does not contain the expected message '${SC_EXPECTED}' -- this may be an unrelated failure rather than proof of this leg's specific rejection"
+              exit 1
+              ;;
+          esac
+
+          echo "Confirmed: ${SC_REASON} failed with the expected message: ${SC_EXPECTED}"
+
+  # The README promises a caller's own explicit setting of any exported
+  # variable always wins. This is the only leg that exercises that guarantee.
+  # It sets CLBlast_ROOT -- a variable the action exports but never itself
+  # consumes -- rather than CLBLAST_LIBS, because the action's own verify step
+  # compiles against CLBLAST_LIBS and a sentinel there could not distinguish
+  # "set_env correctly deferred" from "the action never reached set_env".
+  env-idempotency:
+    name: a caller's CLBlast_ROOT wins over the action's export
+    runs-on: ubuntu-24.04
+    env:
+      CLBlast_ROOT: sentinel-value
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Set up CLBlast
+        uses: ./
+
+      - name: Confirm the caller's CLBlast_ROOT was not overwritten
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${CLBlast_ROOT}" != "sentinel-value" ]; then
+            echo "::error::Expected CLBlast_ROOT to remain 'sentinel-value', got '${CLBlast_ROOT}'"
+            exit 1
+          fi
+          echo "CLBlast_ROOT correctly preserved the caller's own value: ${CLBlast_ROOT}"
+
+  # A composed run with no OpenCL device must install CLBlast and report
+  # honestly rather than failing. This is the only leg that reaches the
+  # verifier's exit-code-2 branch.
+  no-device:
+    name: install without a device and report it
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL with headers and loader only
+        uses: coatless-actions/setup-opencl@v1
+        with:
+          runtime: none
+          verify: 'false'
+
+      - name: Set up CLBlast
+        id: setup
+        uses: ./
+
+      - name: Confirm the action reported no device rather than failing
+        shell: bash
+        env:
+          SC_STATUS: ${{ steps.setup.outputs.verify-status }}
+          SC_VERSION: ${{ steps.setup.outputs.clblast-version }}
+        run: |
+          set -euo pipefail
+          echo "verify-status  = ${SC_STATUS}"
+          echo "clblast-version= ${SC_VERSION}"
+          case "${SC_STATUS}" in
+            no-platform|no-device) ;;
+            *)
+              echo "::error::Expected verify-status 'no-platform' or 'no-device', got '${SC_STATUS}'"
+              exit 1
+              ;;
+          esac
+          [ -n "${SC_VERSION}" ] || {
+            echo "::error::CLBlast was not installed even though the device was optional"
+            exit 1
+          }
+
+  # Tier 2: public-preview and deprecated runner labels, plus the floating
+  # *-latest labels. These have no SLA and change without notice, so they run
+  # on the schedule only and never fail a pull request. The cron is what
+  # catches ubuntu-latest rolling forward to 26.04, where libclblast-dev goes
+  # 1.6.2 -> 1.6.3.
+  preview:
+    name: ${{ matrix.source }} on ${{ matrix.os }} (preview)
+    runs-on: ${{ matrix.os }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-26.04,     source: auto }
+          - { os: ubuntu-26.04-arm, source: auto }
+          - { os: ubuntu-22.04,     source: auto }
+          - { os: macos-15-intel,   source: auto }
+          - { os: ubuntu-latest,    source: auto }
+          - { os: macos-latest,     source: auto }
+          - { os: windows-latest,   source: auto }
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Set up CLBlast
+        id: setup
+        uses: ./
+
+      # Deliberately weaker than Tier 1: version and source vary by image, so
+      # only the correctness assertion is portable across these labels.
+      - name: Confirm the GEMM was correct
+        shell: bash
+        env:
+          SC_STATUS: ${{ steps.setup.outputs.verify-status }}
+          SC_VERSION: ${{ steps.setup.outputs.clblast-version }}
+          SC_SOURCE_USED: ${{ steps.setup.outputs.source-used }}
+          SC_ERROR: ${{ steps.setup.outputs.max-abs-error }}
+        run: |
+          set -euo pipefail
+          echo "source-used    = ${SC_SOURCE_USED}"
+          echo "clblast-version= ${SC_VERSION}"
+          echo "verify-status  = ${SC_STATUS}"
+          echo "max-abs-error  = ${SC_ERROR}"
+          if [ "${SC_STATUS}" != "ok" ]; then
+            echo "::error::Expected verify-status 'ok', got '${SC_STATUS}'"
+            exit 1
+          fi
