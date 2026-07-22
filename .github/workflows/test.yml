@@ -45,6 +45,13 @@ jobs:
           # 'true' and so never exercises the other branch of the action's
           # own `if: ... && inputs.cache == 'true'` gate.
           - { os: macos-latest,     source: build,   expect-source: build,   expect-version: '1.7.0', cache: 'false' }
+          # A paired non-default version/commit has no coverage otherwise --
+          # every leg above either omits both (the default) or hits a
+          # package install that ignores them. 1.6.3 is CLBlast's real tag
+          # for the GEMMK=1/MWG!=NWG fix the "Warn about CLBlast versions
+          # with a known GEMM bug" step names; its commit comes from
+          # `git ls-remote --tags https://github.com/CNugteren/CLBlast 1.6.3`.
+          - { os: ubuntu-24.04,     source: build,   expect-source: build,   expect-version: '1.6.3', cache: 'true', version: '1.6.3', commit: '2a081972b20911ddf76a6b40df717c7d0c181268' }
 
     steps:
       - name: Checkout the action
@@ -59,6 +66,8 @@ jobs:
         with:
           source: ${{ matrix.source }}
           cache: ${{ matrix.cache }}
+          version: ${{ matrix.version }}
+          commit: ${{ matrix.commit }}
 
       - name: Confirm the action reported a correct GEMM
         shell: bash
