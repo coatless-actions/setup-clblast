@@ -674,3 +674,85 @@ jobs:
             echo "::error::cmake configured successfully against CLBlast 1.6.3's config (the stub did not fire); the build then failed at link time instead, which is still a failure of this action's own fail-closed guarantee -- the config was only rejected because a hardcoded path happens not to exist on this runner, not because setup-clblast refused it."
           fi
           exit 1
+
+  # Every push to this repo changes install-windows.ps1, which changes
+  # script-hash, which changes the cache key -- so no leg above has ever
+  # actually restored a Windows tree this action previously extracted and
+  # repaired. The rewrite's behaviour re-run against an already-repaired
+  # config was unproven, and that is the path every consumer's second run
+  # takes. This job runs the action twice in one job, the way the macOS
+  # cache-reuse job above already does, so the second invocation runs
+  # against the exact tree the first one left on disk.
+  windows-cache-reuse:
+    name: a second Windows run reuses the extracted tree and repairs it correctly
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Set up CLBlast
+        id: first
+        uses: ./
+
+      - name: Record the extracted tree's identity
+        shell: bash
+        env:
+          SC_ROOT: ${{ steps.first.outputs.clblast-root }}
+        run: |
+          set -euo pipefail
+          # CLBlastConfig.cmake.orig is written once, the first time this
+          # tree is ever extracted, and never touched again -- a
+          # re-extraction on the second run below would delete and recreate
+          # it with a new mtime, so that mtime is the signal that the second
+          # run reused this tree rather than downloading and extracting a
+          # fresh one, not merely that the bytes still match.
+          stat -c '%Y' "${SC_ROOT}/lib/cmake/CLBlast/CLBlastConfig.cmake.orig" > "${RUNNER_TEMP}/first-orig-mtime"
+          cat "${RUNNER_TEMP}/first-orig-mtime"
+
+      - name: Set up CLBlast again
+        id: second
+        uses: ./
+
+      - name: Confirm the second run reused the tree and repaired it correctly
+        shell: bash
+        env:
+          SC_ROOT: ${{ steps.second.outputs.clblast-root }}
+          SC_STATUS: ${{ steps.second.outputs.verify-status }}
+          SC_ERROR: ${{ steps.second.outputs.max-abs-error }}
+        run: |
+          set -euo pipefail
+          before="$(cat "${RUNNER_TEMP}/first-orig-mtime")"
+          after="$(stat -c '%Y' "${SC_ROOT}/lib/cmake/CLBlast/CLBlastConfig.cmake.orig")"
+          echo "first  CLBlastConfig.cmake.orig mtime = ${before}"
+          echo "second CLBlastConfig.cmake.orig mtime = ${after}"
+          if [ "${before}" != "${after}" ]; then
+            echo "::error::The second run re-extracted the CLBlast tree instead of reusing it; the completeness gate in install-windows.ps1 did not short-circuit"
+            exit 1
+          fi
+
+          echo "verify-status (second run) = ${SC_STATUS}"
+          echo "max-abs-error (second run) = ${SC_ERROR}"
+
+          # verify-status is produced by compiling and running against
+          # CLBLAST_CPPFLAGS/CLBLAST_LIBS, so a passing result here does not
+          # by itself retest the CMake rewrite -- but a second run that
+          # crashed, hung, or emitted broken flags while re-deriving them
+          # from an already-repaired tree would show up here too. This is
+          # the same signal the task's main matrix legs already rely on for
+          # a first run; asserting it here is what proves a second run
+          # against a reused tree is just as sound as the first.
+          if [ "${SC_STATUS}" != "ok" ]; then
+            echo "::error::Expected verify-status 'ok' on the second (cache-hit) run, got '${SC_STATUS}'"
+            exit 1
+          fi
+          case "${SC_ERROR}" in
+            ''|*[!0-9.eE+-]*)
+              echo "::error::max-abs-error '${SC_ERROR}' is not a plain number"
+              exit 1
+              ;;
+          esac
+          echo "Confirmed: the second run reused the extracted tree and still verified correctly."
