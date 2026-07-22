@@ -2,29 +2,39 @@
 
 ## Why this matters here
 
-This action downloads third-party archives (an OpenCL SDK and, on Windows, a
-CPU runtime), registers a vendor ICD loader entry under `HKLM` on Windows,
-and modifies `PATH` and other job-environment variables. A flaw in the
-digest pins, the download URLs, the registry write, or the
-environment-export logic could let a workflow run untrusted code or link
-against a tampered binary.
+This action's supply chain is platform-specific, and it is a different
+shape from the sibling `setup-opencl` action's: this action does not touch
+the Windows registry and does not install a vendor ICD loader entry -- that
+remains `setup-opencl`'s job. What this action actually does is build or
+install the CLBlast BLAS library and report where the result landed:
 
-Verification is not uniform across every path, and it is worth being
-precise about that:
+- **macOS**: builds CLBlast from source. The build checks out CLBlast at a
+  commit SHA pinned to the resolved version and compiles it locally with
+  CMake. No archive is downloaded on this path, so there is no digest to
+  verify -- the pinned commit SHA is the integrity guarantee, with `git`
+  itself as the transport.
+- **Linux**: installs the `libclblast-dev` distribution package via `apt`.
+  Integrity here comes from `apt`'s own repository signing, not from an
+  independent check performed by this action.
+- **Windows**: downloads a prebuilt CLBlast `.7z` release archive from
+  GitHub Releases and extracts it with 7-Zip. This is the one path where
+  this action fetches and must independently verify a third-party binary
+  archive.
 
-- **Pinned default** (no `version:` input): each archive is verified
-  against a SHA-256 digest fixed in this action's source and refreshed by
-  its own update automation. This is the strongest guarantee -- a true pin,
-  independent of the download itself.
-- **Cache hit**: nothing is downloaded and nothing is re-hashed. Integrity
-  instead comes from the cache key's binding to the installer script's
-  hash and the resolved version, not from a digest check.
-- **`version:` override**: the digest is resolved from the same GitHub
-  Releases API response used to resolve the download itself, moments
-  before the bytes are fetched from that same origin -- a transport check,
-  not a pin against a value fixed in advance. If the API reports no digest
-  for the resolved asset, the download is refused outright rather than
-  proceeding unverified.
+The design commits to verifying every such archive against a SHA-256
+digest before extraction, fail-closed -- a download with nothing to verify
+against is refused rather than installed unverified, the same guarantee
+`setup-opencl` gives its own downloads. **As of this revision, that
+download-and-verify logic for the Windows path has not been implemented
+yet**; it is planned for a later change to this repository. This section
+will be updated with the actual mechanism -- including which versions ship
+a published digest and what happens when one is missing -- once that code
+exists, rather than asserting behavior that is not yet there.
+
+The action also exports the resolved install location (include/library
+paths and, on Windows, the DLL directory) into job outputs and, on
+Windows, `PATH`, so a workflow can compile and link against CLBlast
+without re-deriving those paths itself.
 
 ## Supported versions
 
