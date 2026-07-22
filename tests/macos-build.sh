@@ -61,17 +61,32 @@ otool -D "${library}" | tail -1 | grep -q '^@rpath' \
 export CLBLAST_CPPFLAGS="$(printf '%s\n' "${out}" | sed -n 's/^clblast-cppflags=//p')"
 export CLBLAST_LIBS="$(printf '%s\n' "${out}" | sed -n 's/^clblast-libs=//p')"
 
-printf '== numeric check ==\n'
+printf '== numeric check (cold) ==\n'
 tests/verify-contract.sh ok
 
 printf '== warm run (must be a no-op) ==\n'
 warm_start="$(date +%s)"
-bash scripts/install-macos.sh >/dev/null
+warm_out="$(bash scripts/install-macos.sh)"
 warm_end="$(date +%s)"
 warm="$((warm_end - warm_start))"
 printf 'warm run took %s s\n' "${warm}"
 [ "${warm}" -le 5 ] \
     || fail "warm run took ${warm} s; the completeness gate is not short-circuiting the build"
 
-printf 'PASS: cold %ss, warm %ss, linked against the Khronos loader\n' \
+# A fast warm run only proves the build was skipped, not that what got
+# skipped-to is correct. The project's own measurements show a warm PoCL
+# kernel cache hides the SDKROOT-unset defect completely (CLBlastSgemm
+# reports success with a garbage buffer on a cold cache, but a warm cache
+# masks it), so "fast" is not "correct" and the cache-hit path gets the same
+# numeric check the cold build did -- re-exporting the warm run's own
+# emitted flags rather than reusing the cold run's, so a cache hit serving a
+# wrong or stale tree cannot pass by riding the cold run's already-verified
+# flags.
+export CLBLAST_CPPFLAGS="$(printf '%s\n' "${warm_out}" | sed -n 's/^clblast-cppflags=//p')"
+export CLBLAST_LIBS="$(printf '%s\n' "${warm_out}" | sed -n 's/^clblast-libs=//p')"
+
+printf '== numeric check (warm) ==\n'
+tests/verify-contract.sh ok
+
+printf 'PASS: cold %ss, warm %ss, linked against the Khronos loader, numerics verified cold and warm\n' \
     "$((cold_end - cold_start))" "${warm}"
