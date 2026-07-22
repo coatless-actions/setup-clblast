@@ -483,6 +483,37 @@ jobs:
           fi
           echo "Correctly refused: CLBlast 1.6.2 has no SHA-256 digest, from the GitHub API or from \$KnownDigests"
 
+      # The outcome check above only proves the step failed -- an unrelated
+      # Windows breakage (a GitHub API outage, a 7z regression, a runner
+      # image change) fails it exactly the same way and this job would stay
+      # green for the wrong reason. A 'uses:' step's own stdout cannot be
+      # piped into a later step, so the script is invoked a second time
+      # directly, with the same inputs the composite action would have
+      # passed it, and its captured output is checked for the specific
+      # refusal message rather than just its exit code.
+      - name: Confirm the refusal reason is the missing digest, not something else
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $output = & ./scripts/install-windows.ps1 -Version '1.6.2' -InstallDir "$env:RUNNER_TEMP\clblast-refusal-check" 2>&1 | Out-String
+          Write-Output $output
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "::error::Expected scripts/install-windows.ps1 to fail for CLBlast 1.6.2, but it exited 0"
+            exit 1
+          }
+          if ($output -notmatch 'has no SHA-256 digest') {
+            Write-Output "::error::install-windows.ps1 failed, but its output does not contain 'has no SHA-256 digest' -- this could be an unrelated failure rather than proof of the digest refusal this job exists to cover"
+            exit 1
+          }
+          Write-Output "Confirmed: the failure is specifically the missing SHA-256 digest, not an unrelated cause."
+          # install-windows.ps1's own 'exit 1' set $LASTEXITCODE and nothing
+          # above resets it -- GitHub's pwsh runner checks $LASTEXITCODE
+          # after the script body regardless of whether this step's own
+          # logic ever called exit, and would otherwise fail this step for
+          # succeeding at the very thing it was checking for.
+          exit 0
+
   # The only leg that exercises install-windows.ps1's $KnownDigests table
   # branch and the .7z-versus-.zip asset resolution together -- every leg in
   # the main matrix takes the default 1.7.0, whose digest instead comes from
