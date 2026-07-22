@@ -893,7 +893,19 @@ jobs:
           # normalizes line breaks -- this re-invocation reads the file as
           # plain text instead and must normalize them itself to match.
           awk '
-            index($0, "    - name: Validate inputs and resolve the source") == 1 { found = 1 }
+            index($0, "    - name: Validate inputs and resolve the source") == 1 { found = 1; next }
+            # Bound the search to that step. Without this, "found" would stay
+            # set forever, and an action.yml edit that kept the step name but
+            # changed how its body is introduced -- externalizing it to a
+            # script file, or switching the block scalar to > -- would let the
+            # next rule bind to another step's "run: |" and splice an
+            # unrelated body in here, non-empty and so past the
+            # empty-extraction check below. Stopping at the next step boundary
+            # makes that reformat produce an empty file, which is what the
+            # check downstream actually detects.
+            found && !inrun && index($0, "    - name:") == 1 {
+              exit
+            }
             found && index($0, "      run: |") == 1 { inrun = 1; next }
             inrun {
               gsub(/\r$/, "")
@@ -901,6 +913,12 @@ jobs:
               print substr($0, 9)
             }
           ' action.yml > "${RUNNER_TEMP}/resolve-step.sh"
+
+          if [ ! -s "${RUNNER_TEMP}/resolve-step.sh" ]; then
+            echo "::error::Could not extract action.yml's resolve step -- the extraction produced nothing"
+            echo "action.yml's 'Validate inputs and resolve the source' step has been renamed, reindented, or had its inline 'run: |' body replaced. Update the awk anchors in this step to match, or convert this leg to invoke the action directly with continue-on-error."
+            exit 1
+          fi
 
           set +e
           actual_output="$(
