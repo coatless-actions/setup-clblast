@@ -51,11 +51,16 @@ if [ "${source_mode}" = "build" ]; then
     # cmake and git are not guaranteed inside a 'container:' job, and neither
     # is on the ubuntu runner images' critical path for anything else this
     # script does -- install them only on the branch that needs them.
+    #
+    # Redirected to stderr: dpkg's "Setting up ..." lines print to stdout,
+    # and stdout is this script's key=value contract. -qq suppresses most of
+    # it but not dpkg's own configure-time output, so the redirect is still
+    # needed to keep the contract stream clean.
     # shellcheck disable=SC2086
-    ${sudo_cmd} env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    ${sudo_cmd} env DEBIAN_FRONTEND=noninteractive apt-get update -qq >&2
     # shellcheck disable=SC2086
     ${sudo_cmd} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-        --no-install-recommends cmake git ca-certificates
+        --no-install-recommends cmake git ca-certificates >&2
 
     SC_PREFIX="${prefix}" \
     SC_OPENCL_INCLUDE_DIRS="${OpenCL_INCLUDE_DIR:-/usr/include}" \
@@ -85,11 +90,14 @@ if [ "${source_mode}" = "build" ]; then
     exit 0
 fi
 
+# Redirected to stderr for the same reason as the 'build' branch above:
+# dpkg's "Setting up ..." lines print to stdout, which is this script's
+# key=value contract.
 # shellcheck disable=SC2086
-${sudo_cmd} env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+${sudo_cmd} env DEBIAN_FRONTEND=noninteractive apt-get update -qq >&2
 # shellcheck disable=SC2086
 ${sudo_cmd} env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    --no-install-recommends libclblast-dev
+    --no-install-recommends libclblast-dev >&2
 
 libdir="/usr/lib/${multiarch}"
 library="${libdir}/libclblast.so"
