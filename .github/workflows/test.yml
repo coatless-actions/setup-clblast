@@ -247,3 +247,87 @@ jobs:
 
           "${consumer_bin}"
           echo "CMake-built consumer ran and exited 0"
+
+  # A cache hit is only observable from outside the action as a build that
+  # did not happen. This job runs the action twice in one job: the first run
+  # populates ${{ runner.temp }}/clblast, the second must find it complete
+  # and short-circuit. Two runs in one job also sidesteps the fact that
+  # actions/cache does not save until post-job, so a second *job* would race
+  # the save on a cold repository.
+  cache-reuse:
+    name: a second run reuses the built tree
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Set up CLBlast
+        id: first
+        uses: ./
+
+      - name: Record the built tree's identity
+        shell: bash
+        env:
+          SC_LIBRARY: ${{ steps.first.outputs.clblast-library }}
+        run: |
+          set -euo pipefail
+          # A rebuild produces a new mtime even when the bytes are identical,
+          # so mtime is the signal, not a checksum.
+          stat -f '%m' "${SC_LIBRARY}" > "${RUNNER_TEMP}/first-mtime"
+          cat "${RUNNER_TEMP}/first-mtime"
+
+      # actions/cache's tar round-trip is the one part of this action's cache
+      # path that has never been observed directly: install-macos.sh's
+      # completeness gate only checks '-e' (which follows a symlink to its
+      # target), so a tar that flattened these into independent regular
+      # files, or a tar that produced a dangling link, would both be silent
+      # here rather than in the gate itself. Report what actually came back
+      # instead of assuming cmake's install-time layout survived.
+      - name: Report whether the restored library files are still symlinks
+        shell: bash
+        env:
+          SC_ROOT: ${{ steps.first.outputs.clblast-root }}
+        run: |
+          set -euo pipefail
+          lib="${SC_ROOT}/lib"
+          ls -la "${lib}"
+          for f in libclblast.dylib libclblast.1.dylib; do
+            path="${lib}/${f}"
+            if [ -L "${path}" ]; then
+              echo "${f}: symlink -> $(readlink "${path}")"
+            elif [ -e "${path}" ]; then
+              echo "::warning::${f} survived as a regular file, not a symlink -- actions/cache's tar round-trip did not preserve the link"
+            else
+              echo "::error::${f} is missing entirely after restore"
+              exit 1
+            fi
+          done
+
+      - name: Set up CLBlast again
+        id: second
+        uses: ./
+
+      - name: Confirm the second run did not rebuild
+        shell: bash
+        env:
+          SC_LIBRARY: ${{ steps.second.outputs.clblast-library }}
+          SC_STATUS: ${{ steps.second.outputs.verify-status }}
+        run: |
+          set -euo pipefail
+          before="$(cat "${RUNNER_TEMP}/first-mtime")"
+          after="$(stat -f '%m' "${SC_LIBRARY}")"
+          echo "first mtime = ${before}"
+          echo "second mtime= ${after}"
+          if [ "${before}" != "${after}" ]; then
+            echo "::error::The second run rebuilt CLBlast; the completeness gate in install-macos.sh did not short-circuit"
+            exit 1
+          fi
+          if [ "${SC_STATUS}" != "ok" ]; then
+            echo "::error::The second run's GEMM check reported '${SC_STATUS}', not 'ok'"
+            exit 1
+          fi
+          echo "Confirmed: the second run reused the existing tree and still verified correctly."
