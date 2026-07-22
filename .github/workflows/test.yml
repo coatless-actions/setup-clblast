@@ -29,14 +29,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # 'cache' is set explicitly on every row, never left to a
+          # ${{ matrix.cache || 'true' }} fallback: unquoted YAML `false` in
+          # a matrix value becomes the boolean `false`, which is falsy to
+          # Actions' `||`, so that pattern would silently substitute 'true'
+          # back in and delete the only leg meant to cover the action's
+          # `cache: false` branch with nothing turning red to say so.
+          #
           # Tier 1: generally available runner labels. These must stay green.
-          - { os: ubuntu-24.04,     source: auto,    expect-source: package, expect-version: '1.6.2' }
-          - { os: ubuntu-24.04-arm, source: auto,    expect-source: package, expect-version: '1.6.2' }
-          - { os: ubuntu-24.04,     source: build,   expect-source: build,   expect-version: '1.7.0' }
-          - { os: macos-latest,     source: auto,    expect-source: build,   expect-version: '1.7.0' }
+          - { os: ubuntu-24.04,     source: auto,    expect-source: package, expect-version: '1.6.2', cache: 'true' }
+          - { os: ubuntu-24.04-arm, source: auto,    expect-source: package, expect-version: '1.6.2', cache: 'true' }
+          - { os: ubuntu-24.04,     source: build,   expect-source: build,   expect-version: '1.7.0', cache: 'true' }
+          - { os: macos-latest,     source: auto,    expect-source: build,   expect-version: '1.7.0', cache: 'true' }
           # cache: false has no coverage otherwise -- every leg above takes
-          # the action's default 'true' and so never exercises the other
-          # branch of its own `if: ... && inputs.cache == 'true'` gate.
+          # 'true' and so never exercises the other branch of the action's
+          # own `if: ... && inputs.cache == 'true'` gate.
           - { os: macos-latest,     source: build,   expect-source: build,   expect-version: '1.7.0', cache: 'false' }
 
     steps:
@@ -51,7 +58,7 @@ jobs:
         uses: ./
         with:
           source: ${{ matrix.source }}
-          cache: ${{ matrix.cache || 'true' }}
+          cache: ${{ matrix.cache }}
 
       - name: Confirm the action reported a correct GEMM
         shell: bash
