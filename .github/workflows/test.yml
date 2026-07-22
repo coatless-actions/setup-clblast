@@ -54,6 +54,11 @@ jobs:
           - { os: ubuntu-24.04,     source: build,   expect-source: build,   expect-version: '1.6.3', cache: 'true', version: '1.6.3', commit: '2a081972b20911ddf76a6b40df717c7d0c181268' }
           - { os: windows-2025,     source: auto,    expect-source: package, expect-version: '1.7.0', cache: 'true' }
           - { os: windows-2022,     source: auto,    expect-source: package, expect-version: '1.7.0', cache: 'true' }
+          # The only leg that exercises install-windows.ps1's $KnownDigests
+          # table branch and the .7z-versus-.zip asset resolution together --
+          # every leg above takes the default 1.7.0, whose digest instead
+          # comes from the GitHub API's own 'digest' field.
+          - { os: windows-2025,     source: auto,    expect-source: package, expect-version: '1.6.3', cache: 'true', version: '1.6.3' }
 
     steps:
       - name: Checkout the action
@@ -445,3 +450,40 @@ jobs:
             exit 1
           fi
           echo "Confirmed: a stamp mismatch forced a rebuild rather than reusing the stale tree."
+
+  # A later addition brings a full 'reject' job covering every validation
+  # branch this action has. Until then, this is the one rejection this
+  # action's own decisions require standalone coverage for: a Windows
+  # CLBlast version with no SHA-256 digest available (neither $KnownDigests
+  # nor the GitHub API's 'digest' field) must be refused, never installed
+  # unverified.
+  windows-digest-refusal:
+    name: refuse a Windows CLBlast version with no digest
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Attempt setup with a version outside the digest table
+        id: attempt
+        continue-on-error: true
+        uses: ./
+        with:
+          source: auto
+          version: '1.6.2'
+
+      - name: Confirm the action refused the unverifiable download
+        shell: bash
+        env:
+          SC_OUTCOME: ${{ steps.attempt.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "${SC_OUTCOME}" != "failure" ]; then
+            echo "::error::Expected the action to refuse CLBlast 1.6.2 on Windows (no SHA-256 digest available), but it succeeded"
+            exit 1
+          fi
+          echo "Correctly refused: CLBlast 1.6.2 has no SHA-256 digest, from the GitHub API or from \$KnownDigests"
