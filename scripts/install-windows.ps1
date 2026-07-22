@@ -34,6 +34,17 @@
     the loader setup-opencl installed. The rewrite is fail-closed: if either
     line is absent, CLBlast_DIR is not emitted and a warning names the
     version, rather than exporting a config known to be wrong.
+
+    A pristine copy of the shipped file (CLBlastConfig.cmake.orig) is saved
+    the first time the tree is extracted, and every rewrite reads from that
+    copy rather than from CLBlastConfig.cmake itself. The tree this runs
+    against is frequently a cache hit, not a fresh extraction: without the
+    pristine copy, a run against a tree an earlier run already rewrote (or
+    already stubbed, on the OpenCL_INCLUDE_DIR/OpenCL_LIBRARY-unset path)
+    would find nothing left to match -- the vcpkg text is gone either way --
+    and mis-declare the config unusable. Reading from the untouched copy
+    every time makes the rewrite idempotent no matter how many times it runs
+    against the same cached tree.
 #>
 
 [CmdletBinding()]
@@ -195,7 +206,20 @@ if (-not (Test-TreeComplete $treeDir)) {
 
 $cmakeDir    = Join-Path $treeDir 'lib\cmake\CLBlast'
 $cmakeConfig = Join-Path $cmakeDir 'CLBlastConfig.cmake'
+$cmakeOrig   = Join-Path $cmakeDir 'CLBlastConfig.cmake.orig'
 $cmakeUsable = $false
+
+# Saved once, from whatever is on disk the first time this runs against a
+# given tree, and never touched again. Every rewrite below reads from this
+# copy instead of from CLBlastConfig.cmake, so re-running this script
+# against an already-repaired or already-stubbed tree (a cache hit, or a
+# second invocation in the same job) still has the original vcpkg text to
+# match against, rather than reading back its own previous output -- or a
+# previous FATAL_ERROR stub -- and matching nothing. This is a no-op after
+# the first run against a given tree.
+if (-not (Test-Path $cmakeOrig)) {
+    Copy-Item -Path $cmakeConfig -Destination $cmakeOrig
+}
 
 $loaderInclude = $env:OpenCL_INCLUDE_DIR
 $loaderLibrary = $env:OpenCL_LIBRARY
@@ -215,7 +239,7 @@ function Disable-CMakeConfig([string] $Reason) {
 }
 
 if ($loaderInclude -and $loaderLibrary) {
-    $content = Get-Content -Raw -Path $cmakeConfig
+    $content = Get-Content -Raw -Path $cmakeOrig
     $incFwd = $loaderInclude -replace '\\', '/'
     $libFwd = $loaderLibrary -replace '\\', '/'
 
