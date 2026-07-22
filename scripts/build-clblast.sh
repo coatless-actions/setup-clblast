@@ -67,7 +67,7 @@ git clone --quiet --depth 1 --branch "${version}" \
 actual="$(git -C "${work}/src" rev-parse HEAD)"
 if [ "${actual}" != "${commit}" ]; then
     echo "::error::CLBlast tag '${version}' resolved to commit ${actual}, expected ${commit}"
-    echo "The upstream tag was moved, or the checkout was tampered with in transit. Do not trust this tree. If upstream genuinely re-tagged the release, verify the new commit out of band before updating the pin in scripts/install-macos.sh."
+    echo "The upstream tag was moved, or the checkout was tampered with in transit. Do not trust this tree. If upstream genuinely re-tagged the release, verify the new commit out of band before updating the pinned SC_COMMIT this script was given."
     exit 1
 fi
 
