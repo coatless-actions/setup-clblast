@@ -40,6 +40,22 @@ die() {
     exit 1
 }
 
+# SC_VERSION and SC_COMMIT default together (1.7.0 at its pinned commit) and
+# must be supplied together. A caller setting only one would get an emitted
+# clblast-version that disagrees with the commit actually built -- the same
+# kind of identity mismatch the cache stamp below exists to prevent, just
+# arriving from the input side instead of a reused cache. Checked here,
+# before either is defaulted, so the message never mixes a caller-supplied
+# value with the unrelated half of the pinned default.
+if [ -n "${SC_VERSION:-}" ] && [ -z "${SC_COMMIT:-}" ]; then
+    die "SC_VERSION is set without SC_COMMIT" \
+        "SC_VERSION and SC_COMMIT must be supplied together, since the emitted clblast-version has to match the commit actually built. Set both the 'version' and 'commit' inputs, or leave both unset to use the pinned default (1.7.0 at ca2fc3cb09d4917cc72d4ca661d30296865a4afc)."
+fi
+if [ -n "${SC_COMMIT:-}" ] && [ -z "${SC_VERSION:-}" ]; then
+    die "SC_COMMIT is set without SC_VERSION" \
+        "SC_VERSION and SC_COMMIT must be supplied together, since the emitted clblast-version has to match the commit actually built. Set both the 'version' and 'commit' inputs, or leave both unset to use the pinned default (1.7.0 at ca2fc3cb09d4917cc72d4ca661d30296865a4afc)."
+fi
+
 version="${SC_VERSION:-1.7.0}"
 commit="${SC_COMMIT:-ca2fc3cb09d4917cc72d4ca661d30296865a4afc}"
 prefix="${SC_PREFIX:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/clblast}"
