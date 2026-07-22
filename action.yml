@@ -24,7 +24,7 @@ inputs:
     required: false
     default: 'true'
   cache:
-    description: 'Cache the macOS source-build install tree ("true" or "false"). A no-op on runners that install a prebuilt package'
+    description: 'Cache the macOS source-build tree and the Windows release archive ("true" or "false"). A no-op on Linux, which installs from apt'
     required: false
     default: 'true'
 

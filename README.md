@@ -21,7 +21,11 @@ Installing a BLAS library is one package-manager line on Linux. Getting a *corre
           - uses: actions/checkout@v7
           - uses: coatless-actions/setup-opencl@v1
           - uses: coatless-actions/setup-clblast@v1
-          - run: cc -o demo demo.c $CLBLAST_CPPFLAGS $OPENCL_CPPFLAGS $CLBLAST_LIBS $OPENCL_LIBS
+          - run: |
+              # Windows runners ship mingw `gcc` rather than `cc`.
+              compiler=cc
+              command -v cc >/dev/null 2>&1 || compiler=gcc
+              "$compiler" -o demo demo.c $CLBLAST_CPPFLAGS $OPENCL_CPPFLAGS $CLBLAST_LIBS $OPENCL_LIBS
             shell: bash
 
 `setup-clblast` composes with `coatless-actions/setup-opencl` and **must run after it**. It fails closed — with an `::error::` naming the missing variable and telling you to add the `setup-opencl` step — when `OpenCL_ROOT` (or `OpenCL_LIBRARY`) is not already set in the job environment, rather than silently building against whatever loader it happens to find.
