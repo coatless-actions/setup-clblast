@@ -33,7 +33,12 @@
     target that fails at link time. Those two lines are rewritten to point at
     the loader setup-opencl installed. The rewrite is fail-closed: if either
     line is absent, CLBlast_DIR is not emitted and a warning names the
-    version, rather than exporting a config known to be wrong.
+    version, rather than exporting a config known to be wrong. Success is
+    verified by content, not merely by shape: the patched text and every
+    sibling CLBlastConfig-*.cmake file are checked for a leftover 'vcpkg'
+    reference, since a match on the loader's own paths landing does not by
+    itself prove the broken text is gone -- it could still be present
+    somewhere neither -replace call touches.
 
     A pristine copy of the shipped file (CLBlastConfig.cmake.orig) is saved
     the first time the tree is extracted, and every rewrite reads from that
@@ -249,12 +254,47 @@ if ($loaderInclude -and $loaderLibrary) {
         -replace 'INTERFACE_LINK_LIBRARIES "[^"]*"', `
                  "INTERFACE_LINK_LIBRARIES `"$libFwd`""
 
-    if ($patched -match [regex]::Escape($incFwd) -and $patched -match [regex]::Escape($libFwd)) {
+    # The two -replace calls above only prove the loader's own paths landed
+    # -- they say nothing about whether the vcpkg text that was supposed to
+    # be replaced is actually gone. A third property this rewrite does not
+    # target, or a vcpkg reference sitting in a companion file such as
+    # CLBlastConfig-release.cmake (which this script never opens), would
+    # sail through unnoticed: CLBlast 1.6.3 proves upstream really does move
+    # this reference between files and property names release to release.
+    # Check both: the patched text itself for a leftover 'vcpkg', and every
+    # sibling CLBlastConfig-*.cmake file find_package(CLBlast) can still
+    # pull in alongside this one.
+    $vcpkgRemains = $patched -match 'vcpkg'
+
+    $siblingWithVcpkg = Get-ChildItem -Path $cmakeDir -Filter 'CLBlastConfig-*.cmake' -File -ErrorAction SilentlyContinue |
+        Where-Object { (Get-Content -Raw -Path $_.FullName) -match 'vcpkg' } |
+        Select-Object -First 1
+
+    if ($patched -match [regex]::Escape($incFwd) -and $patched -match [regex]::Escape($libFwd) `
+            -and -not $vcpkgRemains -and -not $siblingWithVcpkg) {
         Set-Content -Path $cmakeConfig -Value $patched -NoNewline
         $cmakeUsable = $true
     } else {
-        Write-Output "::warning::Could not rewrite the vcpkg paths baked into CLBlastConfig.cmake for CLBlast $Version, so CLBlast_DIR is not being exported. find_package(CLBlast) would import a target pointing at C:/vcpkg paths that do not exist on this runner. Use CLBLAST_CPPFLAGS and CLBLAST_LIBS instead."
-        Disable-CMakeConfig 'the vcpkg paths were not both found in the two properties this rewrite targets (CLBlast 1.6.3, for example, moves the OpenCL library path into IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE in a companion file instead)'
+        Write-Output "::warning::Could not safely rewrite the vcpkg paths baked into CLBlastConfig.cmake for CLBlast $Version, so CLBlast_DIR is not being exported. find_package(CLBlast) would import a target pointing at C:/vcpkg paths that do not exist on this runner. Use CLBLAST_CPPFLAGS and CLBLAST_LIBS instead."
+        # This reason string ends up inside the stub's own
+        # message(FATAL_ERROR ...) -- the text a caller's build log and this
+        # repo's own CI regression test both see -- so it deliberately never
+        # spells out 'vcpkg' itself, even though that is the actual cause.
+        # The word only needs to appear in this script's own ::warning:: and
+        # comments, which a human reads; a caller's build log or automated
+        # check should never have to distinguish "the stub's prose mentions
+        # vcpkg while explaining itself" from "the broken vcpkg path was
+        # actually loaded into a target", and the only way to make that
+        # distinction unambiguous is to keep the word out of the stub text
+        # entirely.
+        $reason = if ($vcpkgRemains) {
+            'the patched CLBlastConfig.cmake still contains a hardcoded absolute path from the machine that built the package, left in a property this rewrite did not target'
+        } elseif ($siblingWithVcpkg) {
+            "the companion file $($siblingWithVcpkg.Name) contains a hardcoded absolute path from the machine that built the package, in a property this rewrite does not touch"
+        } else {
+            'the two properties this rewrite targets did not both contain a path to replace (CLBlast 1.6.3, for example, moves the OpenCL library path into IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE in a companion file instead)'
+        }
+        Disable-CMakeConfig $reason
     }
 } else {
     Write-Output "::warning::OpenCL_INCLUDE_DIR or OpenCL_LIBRARY is not set, so the vcpkg paths baked into CLBlastConfig.cmake could not be rewritten and CLBlast_DIR is not being exported. Run setup-opencl before this action."
