@@ -243,7 +243,13 @@ jobs:
           cmake -S cmake-consumer -B cmake-consumer/build
           cmake --build cmake-consumer/build
 
-          consumer_bin="$(find cmake-consumer/build -maxdepth 2 -type f -name 'consumer*' ! -name '*.o' | head -n1)"
+          # 'consumer*' is too loose on a multi-config generator: Visual
+          # Studio's own project file cmake-consumer/build/consumer.vcxproj
+          # also matches it, sits at a shallower depth than
+          # Debug/consumer.exe, and 'find' returns it first -- objdump then
+          # rejects it as "file format not recognized" because it is XML,
+          # not a binary. Match the produced binary's exact name instead.
+          consumer_bin="$(find cmake-consumer/build -maxdepth 3 -type f \( -name 'consumer' -o -name 'consumer.exe' \) | head -n1)"
           [ -n "${consumer_bin}" ] || {
             echo "::error::No 'consumer' binary found under cmake-consumer/build after cmake --build"
             exit 1
