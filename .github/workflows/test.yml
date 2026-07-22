@@ -331,3 +331,68 @@ jobs:
             exit 1
           fi
           echo "Confirmed: the second run reused the existing tree and still verified correctly."
+
+  # Task 4's completeness-and-stamp gate in install-macos.sh was unit-tested
+  # locally (see Task 3), but never against a tree that a caller reached
+  # through an actions/cache hit rather than a fresh build. From the gate's
+  # point of view those are indistinguishable -- it only ever looks at files
+  # already sitting at $RUNNER_TEMP/clblast -- so this job proves the
+  # self-correction path by giving it a tree whose identity stamp disagrees
+  # with what is currently requested, the same shape of problem a restored
+  # cache entry for a stale OpenCL_INCLUDE_DIR would produce, and confirming
+  # it deletes and rebuilds rather than serving the stale tree.
+  cache-identity-mismatch:
+    name: a stamp mismatch forces a rebuild rather than reuse
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Set up CLBlast
+        id: first
+        uses: ./
+
+      - name: Record the tree's identity, then corrupt its stamp
+        shell: bash
+        env:
+          SC_LIBRARY: ${{ steps.first.outputs.clblast-library }}
+          SC_ROOT: ${{ steps.first.outputs.clblast-root }}
+        run: |
+          set -euo pipefail
+          stat -f '%m' "${SC_LIBRARY}" > "${RUNNER_TEMP}/mismatch-first-mtime"
+          cat "${RUNNER_TEMP}/mismatch-first-mtime"
+          # Overwrite the stamp install-macos.sh writes after a successful
+          # build so it records a version/commit/OpenCL identity that
+          # disagrees with everything the next invocation will request.
+          printf 'version=0.0.0\ncommit=0000000000000000000000000000000000000000\nopencl-include=/nonexistent\nopencl-library=/nonexistent\n' \
+            > "${SC_ROOT}/.setup-clblast-stamp"
+          cat "${SC_ROOT}/.setup-clblast-stamp"
+
+      - name: Set up CLBlast again
+        id: second
+        uses: ./
+
+      - name: Confirm the mismatch forced a rebuild
+        shell: bash
+        env:
+          SC_LIBRARY: ${{ steps.second.outputs.clblast-library }}
+          SC_STATUS: ${{ steps.second.outputs.verify-status }}
+        run: |
+          set -euo pipefail
+          before="$(cat "${RUNNER_TEMP}/mismatch-first-mtime")"
+          after="$(stat -f '%m' "${SC_LIBRARY}")"
+          echo "first mtime = ${before}"
+          echo "second mtime= ${after}"
+          if [ "${before}" = "${after}" ]; then
+            echo "::error::A corrupted stamp did not force a rebuild; install-macos.sh served a stale tree instead of self-correcting"
+            exit 1
+          fi
+          if [ "${SC_STATUS}" != "ok" ]; then
+            echo "::error::The rebuilt tree's GEMM check reported '${SC_STATUS}', not 'ok'"
+            exit 1
+          fi
+          echo "Confirmed: a stamp mismatch forced a rebuild rather than reusing the stale tree."
