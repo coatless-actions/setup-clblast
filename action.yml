@@ -8,7 +8,11 @@ branding:
 
 inputs:
   version:
-    description: 'CLBlast version to install. Empty means the tested default for this runner: the distribution package on Linux, 1.7.0 on macOS and Windows. Honored for a source build on any OS and for the Windows release asset; ignored, with a warning, for a Linux package install'
+    description: 'CLBlast version (git tag) to install. Empty means the tested default for this runner: the distribution package on Linux, 1.7.0 on macOS and Windows. Honored for a source build on any OS and for the Windows release asset; ignored, with a warning, for a Linux package install. A source build pins an exact commit rather than the mutable tag, so a non-default version requires the paired "commit" input to be set too'
+    required: false
+    default: ''
+  commit:
+    description: 'Git commit SHA the "version" tag must resolve to, for a source build. Required together with a non-default "version" whenever this action builds from source (always on macOS; on Linux only when source resolves to build); ignored otherwise. Empty means the commit pinned for the default version'
     required: false
     default: ''
   source:
@@ -57,6 +61,7 @@ runs:
       shell: bash
       env:
         SC_VERSION: ${{ inputs.version }}
+        SC_COMMIT: ${{ inputs.commit }}
         SC_SOURCE: ${{ inputs.source }}
         SC_VERIFY: ${{ inputs.verify }}
         SC_CACHE: ${{ inputs.cache }}
@@ -130,17 +135,64 @@ runs:
           exit 1
         fi
 
+        # A source build pins an exact commit, not a mutable tag (see
+        # build-clblast.sh), so 'version' and 'commit' are only usable
+        # together once 'version' differs from the default. The four cases
+        # below cover every combination of (version set/unset) x (commit
+        # set/unset):
+        #
+        #   both unset            -> the pinned default for both.
+        #   version=default only  -> pair it with the default commit.
+        #   commit only           -> ambiguous: a commit alone does not say
+        #                            which release it belongs to. Hard error
+        #                            when this action is about to build from
+        #                            source, where the pairing is load
+        #                            bearing; otherwise fall back to the
+        #                            default version so downstream output is
+        #                            never blank (a package install ignores
+        #                            both anyway, see the warnings below).
+        #   version only, non-default -> the exact bug this block exists to
+        #                            fix: 'version' alone used to reach
+        #                            install-macos.sh / build-clblast.sh with
+        #                            no commit and die there, past the point
+        #                            where the caller could still act on the
+        #                            message. Hard error here instead, before
+        #                            any install script runs, naming the
+        #                            input this action actually has.
+        #
+        # Anything else means both were supplied explicitly (including
+        # re-pinning the default version to a different commit) and is used
+        # as given.
         version="${SC_VERSION}"
-        commit=""
-        if [ -z "${version}" ]; then
+        commit="${SC_COMMIT}"
+        if [ -z "${version}" ] && [ -z "${commit}" ]; then
           version="${DEFAULT_VERSION}"
           commit="${DEFAULT_COMMIT}"
-        elif [ "${version}" = "${DEFAULT_VERSION}" ]; then
+        elif [ -n "${version}" ] && [ -z "${commit}" ] && [ "${version}" = "${DEFAULT_VERSION}" ]; then
+          commit="${DEFAULT_COMMIT}"
+        elif [ -z "${version}" ] && [ -n "${commit}" ]; then
+          if [ "${resolved}" = "build" ]; then
+            echo "::error::commit '${commit}' was given without a matching version"
+            echo "A commit alone does not say which CLBlast release it belongs to. Set the 'version' input to the release tag that commit was cut from, alongside 'commit'."
+            exit 1
+          fi
+          version="${DEFAULT_VERSION}"
+        elif [ -n "${version}" ] && [ -z "${commit}" ]; then
+          if [ "${resolved}" = "build" ]; then
+            echo "::error::version '${version}' was given without a matching commit"
+            echo "A source build pins an exact commit, not the mutable '${version}' tag, so 'commit' is required whenever 'version' differs from the tested default (${DEFAULT_VERSION}). Find the commit for a tag with 'git ls-remote --tags https://github.com/CNugteren/CLBlast ${version}', or read it off https://github.com/CNugteren/CLBlast/releases/tag/${version}, then set the 'commit' input alongside 'version'."
+            exit 1
+          fi
           commit="${DEFAULT_COMMIT}"
         fi
 
-        if [ -n "${SC_VERSION}" ] && [ "${SC_OS}" = "Linux" ] && [ "${resolved}" = "package" ]; then
-          echo "::warning::The 'version' input is not honored for a Linux package install; apt supplies whatever libclblast-dev the runner's suite ships. Use 'source: build' to pin a version."
+        if [ "${SC_OS}" = "Linux" ] && [ "${resolved}" = "package" ]; then
+          if [ -n "${SC_VERSION}" ]; then
+            echo "::warning::The 'version' input is not honored for a Linux package install; apt supplies whatever libclblast-dev the runner's suite ships. Use 'source: build' to pin a version."
+          fi
+          if [ -n "${SC_COMMIT}" ]; then
+            echo "::warning::The 'commit' input is not honored for a Linux package install; apt supplies whatever libclblast-dev the runner's suite ships. Use 'source: build' to pin a version and commit."
+          fi
         fi
 
         echo "resolved-source=${resolved}"  >> "$GITHUB_OUTPUT"
