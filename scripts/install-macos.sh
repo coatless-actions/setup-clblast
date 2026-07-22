@@ -8,8 +8,12 @@
 # (its formula declares no loader dependency at all). Loading that bottle in
 # the same process as the Khronos opencl-icd-loader, with OCL_ICD_VENDORS
 # pointed at PoCL, gives SIGSEGV -- reproduced on macOS 26.5.1 arm64, not
-# theorized. 'source: package' on macOS is therefore rejected by action.yml
-# before this script ever runs.
+# theorized. This script rejects 'source: package' itself rather than
+# deferring entirely to action.yml: it already re-checks other things
+# action.yml is supposed to have validated (see the Apple-framework guard
+# below), so silently building from source instead of honoring an explicit
+# 'package' request would be the same kind of inconsistency that guard
+# exists to avoid, applied to itself.
 #
 # The whole install tree is the cache unit. The completeness gate below is a
 # check on every file a consumer actually needs, not a Test-Path on one of
@@ -39,6 +43,15 @@ die() {
 version="${SC_VERSION:-1.7.0}"
 commit="${SC_COMMIT:-ca2fc3cb09d4917cc72d4ca661d30296865a4afc}"
 prefix="${SC_PREFIX:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/clblast}"
+
+# 'package' means Homebrew's clblast bottle, which links Apple's framework
+# and segfaults alongside the Khronos loader (see the header comment).
+# Default stays 'build', the only option, when unset.
+source_mode="${SC_SOURCE:-build}"
+if [ "${source_mode}" = "package" ]; then
+    die "SC_SOURCE=package is not supported on macOS" \
+        "Homebrew's CLBlast bottle links /System/Library/Frameworks/OpenCL.framework, which segfaults when loaded alongside the Khronos ICD loader that setup-opencl installs. Only a source build is supported on macOS; use 'source: build' (the default) or 'source: auto' instead of 'source: package'."
+fi
 
 [ -n "${OpenCL_ROOT:-}" ] \
     || die "OpenCL_ROOT is not set" \
