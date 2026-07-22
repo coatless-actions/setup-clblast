@@ -62,11 +62,22 @@ if [ "${source_mode}" = "build" ]; then
     SC_OPENCL_LIBRARIES="${OpenCL_LIBRARY:-$(find /usr/lib -name 'libOpenCL.so' -print -quit)}" \
         bash "$(dirname "$0")/build-clblast.sh"
 
+    # ${prefix}/lib is not on the default loader search path (it is
+    # RUNNER_TEMP or /tmp, unlike the apt package's /usr/lib/<triplet>
+    # below), so a consumer that only uses '-L${prefix}/lib -lclblast' links
+    # cleanly and then dies at load with "cannot open shared object file".
+    # There is no ELF equivalent of CMAKE_INSTALL_NAME_DIR that would let
+    # libclblast.so.1's own build fix this for every consumer -- an RPATH
+    # baked into the library only governs how *it* resolves *its own*
+    # dependencies, never how a consumer locates the library itself. The
+    # fix has to live on the consumer's side of the boundary: -Wl,-rpath
+    # here lands an RPATH on whatever binary a caller links with this flag
+    # string, exactly like -L and -l already do.
     emit clblast-root           "${prefix}"
     emit clblast-include-dir    "${prefix}/include"
     emit clblast-library        "${prefix}/lib/libclblast.so"
     emit clblast-cppflags       "-I${prefix}/include"
-    emit clblast-libs           "-L${prefix}/lib -lclblast"
+    emit clblast-libs           "-L${prefix}/lib -Wl,-rpath,${prefix}/lib -lclblast"
     emit clblast-cmake-dir      "${prefix}/lib/cmake/CLBlast"
     emit clblast-pkgconfig-dir  "${prefix}/lib/pkgconfig"
     emit clblast-version        "${SC_VERSION}"

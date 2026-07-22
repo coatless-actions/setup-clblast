@@ -49,16 +49,14 @@ platform_args=()
         export CLBLAST_CPPFLAGS="$(printf "%s\n" "${out}" | sed -n "s/^clblast-cppflags=//p")"
         export CLBLAST_LIBS="$(printf "%s\n" "${out}" | sed -n "s/^clblast-libs=//p")"
 
-        # The -lclblast in CLBLAST_LIBS is a link-time-only -L flag; the
-        # dynamic loader still has to find libclblast.so.1 at run time. The
+        # No LD_LIBRARY_PATH here, deliberately: a real consumer only gets
+        # CLBLAST_CPPFLAGS/CLBLAST_LIBS, not a loader search path override,
+        # so the dynamic loader has to find libclblast.so.1 on its own. The
         # apt package lands under /usr/lib/<triplet>, already a default
-        # search path, but a source build lands under RUNNER_TEMP (or /tmp),
-        # which is not -- so this must be set unconditionally, not only on
-        # the build leg, to keep both legs honest about what a real caller
-        # (which likewise gets no rpath from clblast-libs) needs.
-        libdir="$(dirname "$(printf "%s\n" "${out}" | sed -n "s/^clblast-library=//p")")"
-        export LD_LIBRARY_PATH="${libdir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-
+        # search path. The source build relies on the -Wl,-rpath flag
+        # install-linux.sh bakes into CLBLAST_LIBS itself -- if that rpath is
+        # missing or wrong, this step must fail exactly as a real consumer
+        # would, not be papered over here.
         cd /tmp && cp -r /work/tests . && mkdir -p scripts \
             && cp /work/scripts/verify-gemm.c scripts/
         tests/verify-contract.sh ok

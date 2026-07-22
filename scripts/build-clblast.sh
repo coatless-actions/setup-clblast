@@ -21,6 +21,21 @@
 #     "no LC_RPATH's found". Setting it makes the install name absolute so no
 #     consumer rpath is needed. Harmless on Linux, where it is ignored.
 #
+#     There is no ELF equivalent of this trick. CMAKE_INSTALL_RPATH (or
+#     CMAKE_BUILD_WITH_INSTALL_RPATH / CMAKE_INSTALL_RPATH_USE_LINK_PATH)
+#     embeds an RPATH in libclblast.so.1's own dynamic section, which only
+#     governs how *that library* resolves *its own* dependencies -- it does
+#     nothing for how a consumer executable locates libclblast.so.1 itself,
+#     which is looked up via the consumer's own RPATH/RUNPATH before
+#     libclblast.so.1 is even mapped. Measured directly: setting
+#     CMAKE_INSTALL_RPATH here still left a consumer linked with
+#     '-L<prefix>/lib -lclblast' dying at load with "cannot open shared
+#     object file", even though `readelf -d` showed the RUNPATH landing on
+#     libclblast.so.1 exactly as configured. The fix that actually works is
+#     on the consumer side of the boundary: install-linux.sh's 'build' leg
+#     appends '-Wl,-rpath,<prefix>/lib' to the clblast-libs it emits, so an
+#     rpath lands on the consumer's own binary instead.
+#
 # TUNERS defaults to ON upstream and roughly doubles the build; it is the one
 # option worth turning off. CMAKE_POLICY_VERSION_MINIMUM is required for
 # CLBlast <= 1.6.3, which declares cmake_minimum_required(VERSION 2.8.11) and
