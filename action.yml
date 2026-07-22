@@ -45,10 +45,10 @@ outputs:
     description: 'Where CLBlast came from: package or build'
     value: ${{ steps.collect.outputs.source-used }}
   verify-status:
-    description: 'Result of the GEMM check: ok, wrong-result, no-platform, no-device, or a gemm-status-N code. "skipped" when verify is false'
+    description: 'Result of the GEMM check: ok, wrong-result, no-platform, no-device, context-failed, queue-failed, buffer-failed, or a gemm-status-N code. "skipped" when verify is false'
     value: ${{ steps.check.outputs.verify-status }}
   max-abs-error:
-    description: 'Largest absolute difference between the device GEMM and a host reference. Zero is the correct value, not a missing one'
+    description: 'Largest absolute difference between the device GEMM and a host reference. Zero is the correct value, not a missing one. "nan" whenever verify-status is anything other than ok or wrong-result, since no comparable result was produced; empty when verify is false and the check was skipped'
     value: ${{ steps.check.outputs.max-abs-error }}
 
 runs:
@@ -286,6 +286,7 @@ runs:
           macOS) script="install-macos.sh" ;;
           *)
             echo "::error::No install script for runner OS '${RUNNER_OS}'"
+            echo "This should be unreachable: the earlier 'Validate inputs and resolve the source' step already rejects any runner.os other than Linux, macOS, or Windows, and this step only runs when runner.os is not Windows (if: runner.os != 'Windows'). Seeing this means OS detection has drifted out of sync between the two steps -- please open an issue against coatless-actions/setup-clblast with the runner.os value from the failed job."
             exit 1
             ;;
         esac
