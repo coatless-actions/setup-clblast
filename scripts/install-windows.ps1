@@ -200,6 +200,20 @@ $cmakeUsable = $false
 $loaderInclude = $env:OpenCL_INCLUDE_DIR
 $loaderLibrary = $env:OpenCL_LIBRARY
 
+# CMake's find_package(CLBlast) auto-recognizes a CLBlast_ROOT environment
+# variable as a search hint (CMP0074), and this action exports CLBlast_ROOT
+# unconditionally for callers who never touch CMake at all. Withholding
+# CLBlast_DIR alone therefore is not enough: find_package(CLBlast) would
+# still walk in through CLBlast_ROOT and load the very file being withheld.
+# The only way to make the fail-closed guarantee hold regardless of which
+# hint CMake was pointed at is to make the file itself refuse to load.
+function Disable-CMakeConfig([string] $Reason) {
+    $stub = 'message(FATAL_ERROR "setup-clblast could not safely repair CLBlastConfig.cmake for CLBlast ' +
+            $Version + ': ' + $Reason +
+            '. Use the CLBLAST_CPPFLAGS and CLBLAST_LIBS environment variables instead of find_package(CLBlast) in this job.")'
+    Set-Content -Path $cmakeConfig -Value $stub -NoNewline
+}
+
 if ($loaderInclude -and $loaderLibrary) {
     $content = Get-Content -Raw -Path $cmakeConfig
     $incFwd = $loaderInclude -replace '\\', '/'
@@ -216,9 +230,11 @@ if ($loaderInclude -and $loaderLibrary) {
         $cmakeUsable = $true
     } else {
         Write-Output "::warning::Could not rewrite the vcpkg paths baked into CLBlastConfig.cmake for CLBlast $Version, so CLBlast_DIR is not being exported. find_package(CLBlast) would import a target pointing at C:/vcpkg paths that do not exist on this runner. Use CLBLAST_CPPFLAGS and CLBLAST_LIBS instead."
+        Disable-CMakeConfig 'the vcpkg paths were not both found in the two properties this rewrite targets (CLBlast 1.6.3, for example, moves the OpenCL library path into IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE in a companion file instead)'
     }
 } else {
     Write-Output "::warning::OpenCL_INCLUDE_DIR or OpenCL_LIBRARY is not set, so the vcpkg paths baked into CLBlastConfig.cmake could not be rewritten and CLBlast_DIR is not being exported. Run setup-opencl before this action."
+    Disable-CMakeConfig 'OpenCL_INCLUDE_DIR or OpenCL_LIBRARY was not set in the job environment when this ran'
 }
 
 # ---------- emit ----------

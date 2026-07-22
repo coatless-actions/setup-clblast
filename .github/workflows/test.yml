@@ -54,11 +54,6 @@ jobs:
           - { os: ubuntu-24.04,     source: build,   expect-source: build,   expect-version: '1.6.3', cache: 'true', version: '1.6.3', commit: '2a081972b20911ddf76a6b40df717c7d0c181268' }
           - { os: windows-2025,     source: auto,    expect-source: package, expect-version: '1.7.0', cache: 'true' }
           - { os: windows-2022,     source: auto,    expect-source: package, expect-version: '1.7.0', cache: 'true' }
-          # The only leg that exercises install-windows.ps1's $KnownDigests
-          # table branch and the .7z-versus-.zip asset resolution together --
-          # every leg above takes the default 1.7.0, whose digest instead
-          # comes from the GitHub API's own 'digest' field.
-          - { os: windows-2025,     source: auto,    expect-source: package, expect-version: '1.6.3', cache: 'true', version: '1.6.3' }
 
     steps:
       - name: Checkout the action
@@ -487,3 +482,80 @@ jobs:
             exit 1
           fi
           echo "Correctly refused: CLBlast 1.6.2 has no SHA-256 digest, from the GitHub API or from \$KnownDigests"
+
+  # The only leg that exercises install-windows.ps1's $KnownDigests table
+  # branch and the .7z-versus-.zip asset resolution together -- every leg in
+  # the main matrix takes the default 1.7.0, whose digest instead comes from
+  # the GitHub API's own 'digest' field. Kept out of the main matrix rather
+  # than added as a row there: CLBlast 1.6.3's CLBlastConfig.cmake carries
+  # the vcpkg OpenCL reference in a different file and under a different
+  # property name than 1.7.0's (IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE in
+  # a companion CLBlastConfig-release.cmake, not INTERFACE_LINK_LIBRARIES in
+  # CLBlastConfig.cmake itself), so install-windows.ps1's two-line rewrite
+  # correctly cannot repair it and CLBlast_DIR is not exported -- the main
+  # matrix's CMake consumer step assumes find_package(CLBlast) always
+  # succeeds and would wrongly turn that correct refusal into a red leg.
+  windows-digest-table:
+    name: the $KnownDigests table resolves a non-default Windows version
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Set up OpenCL
+        uses: coatless-actions/setup-opencl@v1
+
+      - name: Set up CLBlast
+        id: setup
+        uses: ./
+        with:
+          source: auto
+          version: '1.6.3'
+
+      - name: Confirm the table resolved a correct install
+        shell: bash
+        env:
+          SC_SOURCE_USED: ${{ steps.setup.outputs.source-used }}
+          SC_VERSION: ${{ steps.setup.outputs.clblast-version }}
+          SC_STATUS: ${{ steps.setup.outputs.verify-status }}
+          SC_ERROR: ${{ steps.setup.outputs.max-abs-error }}
+        run: |
+          set -euo pipefail
+          echo "source-used    = ${SC_SOURCE_USED}"
+          echo "clblast-version= ${SC_VERSION}"
+          echo "verify-status  = ${SC_STATUS}"
+          echo "max-abs-error  = ${SC_ERROR}"
+          [ "${SC_SOURCE_USED}" = "package" ] || {
+            echo "::error::Expected source-used 'package', got '${SC_SOURCE_USED}'"
+            exit 1
+          }
+          [ "${SC_VERSION}" = "1.6.3" ] || {
+            echo "::error::Expected clblast-version '1.6.3', got '${SC_VERSION}'"
+            exit 1
+          }
+          [ "${SC_STATUS}" = "ok" ] || {
+            echo "::error::Expected verify-status 'ok', got '${SC_STATUS}'"
+            exit 1
+          }
+          case "${SC_ERROR}" in
+            ''|*[!0-9.eE+-]*)
+              echo "::error::max-abs-error '${SC_ERROR}' is not a plain number"
+              exit 1
+              ;;
+          esac
+
+      # This is the one leg that proves the fail-closed guarantee actually
+      # holds for a version whose CMake config genuinely cannot be repaired,
+      # rather than merely asserting on the version the rewrite happens to
+      # work for. Run this same assertion against 1.7.0 and it would rightly
+      # fail, since 1.7.0's CLBlast_DIR IS exported.
+      - name: Confirm CLBlast_DIR was withheld rather than pointed at a broken config
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${CLBlast_DIR:-}" ]; then
+            echo "::error::Expected CLBlast_DIR to be unset for CLBlast 1.6.3 (its CMake config cannot be safely repaired), but it is '${CLBlast_DIR}'"
+            exit 1
+          fi
+          echo "Confirmed: CLBlast_DIR was correctly withheld for CLBlast 1.6.3."
