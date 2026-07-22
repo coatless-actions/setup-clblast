@@ -16,7 +16,7 @@
  * Inputs are small integers exactly representable in binary32, and the
  * reference accumulates in double, so an exactly-correct device produces
  * max-abs-error=0. The 1e-3 threshold is therefore enormous headroom against
- * fp32 rounding (worst case here is ~1e-2 relative to values of order 1e3,
+ * fp32 rounding (worst case here is ~1e-2 relative to values of order 16,
  * i.e. still exact) and catches only real breakage, never noise.
  */
 
@@ -57,15 +57,28 @@ static int bail(const char *status)
     return 1;
 }
 
+/* Releases whichever OpenCL objects have actually been created; NULL
+ * (not-yet-created, or already-failed) handles are skipped. Harmless to
+ * omit since the process exits right after, but this file is meant to
+ * model correct OpenCL usage. */
+static void cleanup(cl_mem da, cl_mem db, cl_mem dc, cl_command_queue queue, cl_context ctx)
+{
+    if (da != NULL) { clReleaseMemObject(da); }
+    if (db != NULL) { clReleaseMemObject(db); }
+    if (dc != NULL) { clReleaseMemObject(dc); }
+    if (queue != NULL) { clReleaseCommandQueue(queue); }
+    if (ctx != NULL) { clReleaseContext(ctx); }
+}
+
 int main(void)
 {
     cl_platform_id platform = NULL;
     cl_device_id device = NULL;
     cl_uint num_platforms = 0, num_devices = 0;
     cl_int err = CL_SUCCESS;
-    cl_context ctx;
-    cl_command_queue queue;
-    cl_mem da, db, dc;
+    cl_context ctx = NULL;
+    cl_command_queue queue = NULL;
+    cl_mem da = NULL, db = NULL, dc = NULL;
     cl_event ev = NULL;
     CLBlastStatusCode st;
     size_t i, j, k;
@@ -108,7 +121,7 @@ int main(void)
      * properties form does not exist. The deprecated call is present on
      * every version this action supports. */
     queue = clCreateCommandQueue(ctx, device, 0, &err);
-    if (err != CL_SUCCESS) { return bail("queue-failed"); }
+    if (err != CL_SUCCESS) { cleanup(NULL, NULL, NULL, NULL, ctx); return bail("queue-failed"); }
 
     /* Checked individually, not just on the last call: if an earlier buffer
      * fails and a later one happens to succeed, the earlier failure must
@@ -117,18 +130,18 @@ int main(void)
      * so a CI log points at buffer allocation rather than context
      * creation. */
     da = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof a, NULL, &err);
-    if (err != CL_SUCCESS) { return bail("buffer-failed"); }
+    if (err != CL_SUCCESS) { cleanup(NULL, NULL, NULL, queue, ctx); return bail("buffer-failed"); }
     db = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof b, NULL, &err);
-    if (err != CL_SUCCESS) { return bail("buffer-failed"); }
+    if (err != CL_SUCCESS) { cleanup(da, NULL, NULL, queue, ctx); return bail("buffer-failed"); }
     dc = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof c, NULL, &err);
-    if (err != CL_SUCCESS) { return bail("buffer-failed"); }
+    if (err != CL_SUCCESS) { cleanup(da, db, NULL, queue, ctx); return bail("buffer-failed"); }
 
     err = clEnqueueWriteBuffer(queue, da, CL_TRUE, 0, sizeof a, a, 0, NULL, NULL);
-    if (err != CL_SUCCESS) { return bail("queue-failed"); }
+    if (err != CL_SUCCESS) { cleanup(da, db, dc, queue, ctx); return bail("queue-failed"); }
     err = clEnqueueWriteBuffer(queue, db, CL_TRUE, 0, sizeof b, b, 0, NULL, NULL);
-    if (err != CL_SUCCESS) { return bail("queue-failed"); }
+    if (err != CL_SUCCESS) { cleanup(da, db, dc, queue, ctx); return bail("queue-failed"); }
     err = clEnqueueWriteBuffer(queue, dc, CL_TRUE, 0, sizeof c, c, 0, NULL, NULL);
-    if (err != CL_SUCCESS) { return bail("queue-failed"); }
+    if (err != CL_SUCCESS) { cleanup(da, db, dc, queue, ctx); return bail("queue-failed"); }
 
     st = CLBlastSgemm(CLBlastLayoutRowMajor,
                       CLBlastTransposeNo, CLBlastTransposeNo,
@@ -138,6 +151,7 @@ int main(void)
                       &queue, &ev);
     if (st != CLBlastSuccess)
     {
+        cleanup(da, db, dc, queue, ctx);
         printf("max-abs-error=nan\n");
         printf("verify-status=gemm-status-%d\n", (int)st);
         return 1;
@@ -145,13 +159,15 @@ int main(void)
     if (ev != NULL) { clWaitForEvents(1, &ev); clReleaseEvent(ev); }
     clFinish(queue);
     err = clEnqueueReadBuffer(queue, dc, CL_TRUE, 0, sizeof c, c, 0, NULL, NULL);
-    if (err != CL_SUCCESS) { return bail("queue-failed"); }
+    if (err != CL_SUCCESS) { cleanup(da, db, dc, queue, ctx); return bail("queue-failed"); }
 
     for (i = 0; i < (size_t)N * N; i++)
     {
         double d = fabs((double)c[i] - (double)ref[i]);
         if (!(d <= worst)) { worst = d; }   /* NaN-safe: NaN fails <= and wins */
     }
+
+    cleanup(da, db, dc, queue, ctx);
 
     printf("max-abs-error=%.6g\n", worst);
     if (!(worst <= TOLERANCE))
