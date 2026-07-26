@@ -44,7 +44,19 @@ jobs:
           # cache: false has no coverage otherwise -- every leg above takes
           # 'true' and so never exercises the other branch of the action's
           # own `if: ... && inputs.cache == 'true'` gate.
-          - { os: macos-latest,     source: build,   expect-source: build,   expect-version: '1.7.0', cache: 'false' }
+          #
+          # This leg is also the one that pins setup-opencl's 'pocl-source'.
+          # That input's 'auto' now means conda-forge on macOS, so the leg
+          # above composes with a conda-forge PoCL and a Khronos loader living
+          # in a self-contained $RUNNER_TEMP prefix -- and every macOS leg in
+          # this file would, leaving the Homebrew composition (two keg-only
+          # prefixes, a merged root shim, an absolute Cellar install name)
+          # untested here for the first time. It is still a supported value of
+          # that input, and this action builds CLBlast against whichever one a
+          # caller ends up with, so one leg names it explicitly. Nothing about
+          # what CLBlast is expected to do changes with it, which is the
+          # point: the same expectations are asserted on both.
+          - { os: macos-latest,     source: build,   expect-source: build,   expect-version: '1.7.0', cache: 'false', pocl-source: homebrew }
           # A paired non-default version/commit has no coverage otherwise --
           # every leg above either omits both (the default) or hits a
           # package install that ignores them. 1.6.3 is CLBlast's real tag
@@ -61,6 +73,14 @@ jobs:
 
       - name: Set up OpenCL
         uses: coatless-actions/setup-opencl@v1
+        with:
+          # '' || 'auto' rather than a bare matrix reference: every row except
+          # the pinned macOS one leaves this unset, and an empty string is a
+          # rejected value for that input, which would fail the leg on the
+          # wrong thing. Safe from the unquoted-`false` trap the comment at
+          # the top of this matrix describes -- the only values here are
+          # strings, never a YAML boolean.
+          pocl-source: ${{ matrix.pocl-source || 'auto' }}
 
       - name: Set up CLBlast
         id: setup
@@ -355,6 +375,14 @@ jobs:
           after="$(stat -f '%m' "${SC_LIBRARY}")"
           echo "first mtime = ${before}"
           echo "second mtime= ${after}"
+          # A rebuild moves the mtime FORWARD. An mtime that went backwards is
+          # a different tree, not a rebuilt one -- which is what a cache key
+          # rotating between the two invocations looks like, and diagnosing it
+          # as a rebuild sends the reader to the wrong file entirely.
+          if [ "${after}" -lt "${before}" ]; then
+            echo "::error::The second run saw an OLDER CLBlast than the first (${after} < ${before}); the tree changed between invocations rather than being rebuilt. Suspect a cache key that rotated -- including setup-opencl's, since its outputs feed this build."
+            exit 1
+          fi
           if [ "${before}" != "${after}" ]; then
             echo "::error::The second run rebuilt CLBlast; the completeness gate in install-macos.sh did not short-circuit"
             exit 1
