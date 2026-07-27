@@ -2,14 +2,31 @@
 #
 # Exercises the macOS source build end to end: a cold build, an assertion
 # that the result is linked against the Khronos loader rather than Apple's
-# framework, a numeric GEMM check, and a second run that must be a fast
-# no-op because the tree is already complete.
+# framework, a numeric GEMM check, an assertion that the GEMM ran on the
+# library and loader this script installed, and a second run that must be a
+# fast no-op because the tree is already complete.
 #
 # The linkage assertion is the reason this action exists. Homebrew's clblast
 # bottle links /System/Library/Frameworks/OpenCL.framework and exits 139
 # (SIGSEGV) when loaded alongside the Khronos loader with PoCL. A build that
 # silently resolves to the framework would pass a compile-and-link test and
 # crash a consumer.
+#
+# otool answers what the file on disk says; the identity assertion answers
+# what the running process did. Those come apart whenever something else on
+# the search path satisfies the link first, so both are checked.
+#
+# WHAT THIS DOES NOT COVER
+#
+# The OpenCL environment below is a hand-built stand-in for setup-opencl's
+# Homebrew path: two keg-only prefixes, a merged root, and PoCL's vendors
+# directory inside its own keg. That is no longer what setup-opencl hands a
+# macOS caller by default -- its 'pocl-source: auto' now resolves to
+# conda-forge, which emits a self-contained $RUNNER_TEMP prefix, an include
+# shim and an install name rewritten to be absolute. A pass here therefore
+# says the source build is sound against the Homebrew composition, not that
+# the default composition works; the workflow's macOS legs are what cover
+# that, since they compose with the real setup-opencl@v1.
 #
 # Usage: tests/macos-build.sh [prefix]
 
@@ -64,6 +81,14 @@ export CLBLAST_LIBS="$(printf '%s\n' "${out}" | sed -n 's/^clblast-libs=//p')"
 printf '== numeric check (cold) ==\n'
 tests/verify-contract.sh ok
 
+# otool proved what the FILE on disk links against. This proves what the
+# PROCESS bound to, which is a different question and the one a consumer
+# actually depends on: a second libclblast or a second loader ahead of these
+# on the search path would leave the otool output above unchanged and every
+# number below correct.
+printf '== identity (cold) ==\n'
+SC_CLBLAST_LIBRARY="${library}" tests/assert-module-identity.sh --measure
+
 printf '== warm run (must be a no-op) ==\n'
 warm_start="$(date +%s)"
 warm_out="$(bash scripts/install-macos.sh)"
@@ -88,5 +113,9 @@ export CLBLAST_LIBS="$(printf '%s\n' "${warm_out}" | sed -n 's/^clblast-libs=//p
 printf '== numeric check (warm) ==\n'
 tests/verify-contract.sh ok
 
-printf 'PASS: cold %ss, warm %ss, linked against the Khronos loader, numerics verified cold and warm\n' \
+printf '== identity (warm) ==\n'
+SC_CLBLAST_LIBRARY="$(printf '%s\n' "${warm_out}" | sed -n 's/^clblast-library=//p')" \
+    tests/assert-module-identity.sh --measure
+
+printf 'PASS: cold %ss, warm %ss, linked against the Khronos loader, numerics and library identity verified cold and warm\n' \
     "$((cold_end - cold_start))" "${warm}"

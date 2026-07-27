@@ -301,6 +301,123 @@ jobs:
           "${consumer_bin}"
           echo "CMake-built consumer ran and exited 0"
 
+      # The repository's own assertion of the verifier's output contract --
+      # six keys, a numeric error, a documented status, module paths that are
+      # absolute rather than "unknown" -- and of the exit codes action.yml
+      # branches on. Nothing in this workflow invoked anything under tests/
+      # before, so that contract was only ever checked by reading it.
+      # Compiled against the exported environment, which is what a consumer
+      # gets.
+      - name: Assert the verifier's own output contract
+        shell: bash
+        run: tests/verify-contract.sh ok
+
+      # Everything above is satisfied by "a correct GEMM happened somewhere".
+      # None of it pins down WHICH CLBlast or WHICH ICD loader did the
+      # arithmetic, and two search orders this action's own supported
+      # configurations rely on can substitute one without anything going
+      # wrong on the way: install-linux.sh's package branch emits a bare
+      # '-lclblast' with no -L at all, and Windows resolves clblast.dll and
+      # OpenCL.dll through a PE search order that reaches the application
+      # directory and System32 before PATH. Either substitution leaves every
+      # assertion above green.
+      #
+      # tests/assert-module-identity.sh states both cases in full and owns
+      # the comparison, including the path canonicalization it needs --
+      # symlink chains, /private prefixes and drive-letter case would
+      # otherwise fail a comparison of two paths that name the same file.
+      # This step is where the action's own outputs meet it.
+      - name: Confirm the GEMM ran on the CLBlast and loader this action installed
+        shell: bash
+        env:
+          SC_CLBLAST_MODULE: ${{ steps.setup.outputs.clblast-module }}
+          SC_OPENCL_MODULE: ${{ steps.setup.outputs.opencl-module }}
+          SC_CLBLAST_LIBRARY: ${{ steps.setup.outputs.clblast-library }}
+          SC_CLBLAST_ROOT: ${{ steps.setup.outputs.clblast-root }}
+          SC_PLATFORM_NAME: ${{ steps.setup.outputs.platform-name }}
+          SC_DEVICE_NAME: ${{ steps.setup.outputs.device-name }}
+        run: |
+          set -euo pipefail
+          echo "platform-name = ${SC_PLATFORM_NAME}"
+          echo "device-name   = ${SC_DEVICE_NAME}"
+
+          # verify-status was asserted 'ok' above, which means a device ran
+          # the GEMM -- so the action must be able to name both. An empty
+          # value here is a device reported without being identified, which
+          # is the same shape of gap this whole step exists to close.
+          [ -n "${SC_PLATFORM_NAME}" ] || {
+            echo "::error::verify-status was 'ok' but platform-name is empty; the action reported a successful GEMM on a platform it could not name"
+            exit 1
+          }
+          [ -n "${SC_DEVICE_NAME}" ] || {
+            echo "::error::verify-status was 'ok' but device-name is empty; the action reported a successful GEMM on a device it could not name"
+            exit 1
+          }
+
+          tests/assert-module-identity.sh
+
+  # tests/macos-build.sh carries the Apple-framework linkage assertion that
+  # is the entire reason this action refuses Homebrew's bottle on macOS, plus
+  # the install-name check and the warm-run timing bound. None of it had ever
+  # run: no workflow invoked anything under tests/ at all, so those checks
+  # existed only as text.
+  #
+  # Deliberately NOT composed with setup-opencl. The script builds the
+  # Homebrew composition by hand -- two keg-only prefixes and a merged root
+  # shim -- which is a supported input to this action but is no longer what
+  # setup-opencl's macOS default produces, so the matrix above reaches it
+  # only through that action's 'pocl-source: homebrew' leg. Running it
+  # standalone also means a setup-opencl regression cannot turn this
+  # assertion red for an unrelated reason.
+  macos-linkage:
+    name: the built library links the Khronos loader, not Apple's framework
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      - name: Build from source and assert linkage, numerics and identity
+        shell: bash
+        run: tests/macos-build.sh
+
+  # tests/linux-container.sh runs install-linux.sh and the verifier inside a
+  # plain Debian-family container, standing in for setup-opencl by hand. That
+  # reaches ground the matrix above cannot: a 'container:' job's toolchain,
+  # which the README promises support for, and a consumer that receives
+  # nothing but CLBLAST_CPPFLAGS/CLBLAST_LIBS and has to let the dynamic
+  # loader find libclblast.so.1 on its own -- which is exactly what the
+  # -Wl,-rpath in the source build's emitted flags exists for, and which no
+  # other leg tests without a helpful LD_LIBRARY_PATH somewhere. Like
+  # everything else under tests/, nothing invoked it before this job.
+  linux-container:
+    name: install and verify inside a ${{ matrix.source }} container
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { source: package, version: '', commit: '' }
+          # build-clblast.sh requires both and refuses an empty one rather
+          # than defaulting, the same pairing rule action.yml enforces for
+          # the 'version'/'commit' inputs. These are the pinned defaults.
+          - { source: build, version: '1.7.0', commit: 'ca2fc3cb09d4917cc72d4ca661d30296865a4afc' }
+
+    steps:
+      - name: Checkout the action
+        uses: actions/checkout@v7
+
+      # Routed through env rather than interpolated into the run block, the
+      # same way every other matrix value in this file is.
+      - name: Run the container test
+        shell: bash
+        env:
+          SC_TEST_SOURCE: ${{ matrix.source }}
+          SC_VERSION: ${{ matrix.version }}
+          SC_COMMIT: ${{ matrix.commit }}
+        run: tests/linux-container.sh ubuntu:24.04 '' "${SC_TEST_SOURCE}"
+
   # A cache hit is only observable from outside the action as a build that
   # did not happen. This job runs the action twice in one job: the first run
   # populates ${{ runner.temp }}/clblast, the second must find it complete
@@ -795,6 +912,65 @@ jobs:
           esac
           echo "Confirmed: the second run reused the extracted tree and still verified correctly."
 
+      # The reuse above is the good case. The tree's identity stamp exists
+      # for the bad one: a tree that passes the completeness gate while
+      # holding a DIFFERENT version's files, which an actions/cache
+      # restore-keys prefix-fallback hit or a non-ephemeral self-hosted
+      # runner both produce. From the gate's point of view that is
+      # indistinguishable from the reuse this job just proved, so the only
+      # way to test the difference is to give it a tree whose stamp
+      # disagrees with what is requested.
+      - name: Corrupt the extracted tree's identity stamp
+        shell: bash
+        env:
+          SC_ROOT: ${{ steps.second.outputs.clblast-root }}
+        run: |
+          set -euo pipefail
+          printf 'version=0.0.0\nasset=CLBlast-0.0.0-windows-x64.7z\nsha256=0000000000000000000000000000000000000000000000000000000000000000' \
+            > "${SC_ROOT}/.setup-clblast-stamp"
+          cat "${SC_ROOT}/.setup-clblast-stamp"
+
+      # cache: 'false' for the reason the macOS cache-identity-mismatch job
+      # spells out at length: an actions/cache restore step re-extracts over
+      # whatever is already at 'path', unconditionally, so leaving the cache
+      # enabled would put the pristine stamp back before install-windows.ps1
+      # ever looked at the corrupted one.
+      - name: Set up CLBlast a third time
+        id: third
+        uses: ./
+        with:
+          cache: 'false'
+
+      - name: Confirm the stamp mismatch forced a re-extraction
+        shell: bash
+        env:
+          SC_ROOT: ${{ steps.third.outputs.clblast-root }}
+          SC_VERSION: ${{ steps.third.outputs.clblast-version }}
+          SC_STATUS: ${{ steps.third.outputs.verify-status }}
+        run: |
+          set -euo pipefail
+          before="$(cat "${RUNNER_TEMP}/first-orig-mtime")"
+          after="$(stat -c '%Y' "${SC_ROOT}/lib/cmake/CLBlast/CLBlastConfig.cmake.orig")"
+          echo "first CLBlastConfig.cmake.orig mtime = ${before}"
+          echo "third CLBlastConfig.cmake.orig mtime = ${after}"
+          if [ "${before}" = "${after}" ]; then
+            echo "::error::A corrupted stamp did not force a re-extraction; install-windows.ps1 served the stale tree instead of self-correcting"
+            exit 1
+          fi
+          # The version is read back out of the stamp the re-extraction just
+          # wrote, so this also proves clblast-version names what is on disk
+          # rather than echoing the requested tag: the corrupted stamp said
+          # 0.0.0, and a version that survived from it would show up here.
+          if [ "${SC_VERSION}" != "1.7.0" ]; then
+            echo "::error::Expected clblast-version '1.7.0' after the re-extraction, got '${SC_VERSION}'"
+            exit 1
+          fi
+          if [ "${SC_STATUS}" != "ok" ]; then
+            echo "::error::The re-extracted tree's GEMM check reported '${SC_STATUS}', not 'ok'"
+            exit 1
+          fi
+          echo "Confirmed: a stamp mismatch forced a re-extraction and the reported version came from the tree."
+
   # The action validates and rejects five combinations covered here (a
   # sixth, a non-boolean verify/cache value, has no dedicated leg -- it is
   # the same 'case'-style check as the others and shares its mechanism).
@@ -1037,6 +1213,19 @@ jobs:
             exit 1
           }
 
+      # The exit-code half of the verifier's contract -- 2, and only 2, when
+      # there is nothing to test on -- has no other coverage anywhere: every
+      # other leg takes the ok path, where the code is 0.
+      # tests/verify-contract.sh asserts the code alongside the text, and is
+      # handed the status the action itself reported so the two have to agree
+      # about which of the two no-* paths this runner is on rather than the
+      # test picking one and hoping.
+      - name: Assert the verifier's contract on the no-device path
+        shell: bash
+        env:
+          SC_STATUS: ${{ steps.setup.outputs.verify-status }}
+        run: tests/verify-contract.sh "${SC_STATUS}"
+
   # Tier 2: public-preview and deprecated runner labels, plus the floating
   # *-latest labels. These have no SLA and change without notice, so they run
   # on the schedule only and never fail a pull request. The cron is what
@@ -1090,3 +1279,18 @@ jobs:
             echo "::error::Expected verify-status 'ok', got '${SC_STATUS}'"
             exit 1
           fi
+
+      # Portable for the same reason the correctness assertion above is: the
+      # question "did the GEMM run on what this action installed" has the
+      # same answer on every image, however the version and source vary.
+      # These labels move without notice, and a runner image that starts
+      # shipping its own CLBlast or its own loader ahead of this action's is
+      # exactly the kind of drift the nightly exists to notice.
+      - name: Confirm the GEMM ran on the CLBlast and loader this action installed
+        shell: bash
+        env:
+          SC_CLBLAST_MODULE: ${{ steps.setup.outputs.clblast-module }}
+          SC_OPENCL_MODULE: ${{ steps.setup.outputs.opencl-module }}
+          SC_CLBLAST_LIBRARY: ${{ steps.setup.outputs.clblast-library }}
+          SC_CLBLAST_ROOT: ${{ steps.setup.outputs.clblast-root }}
+        run: tests/assert-module-identity.sh

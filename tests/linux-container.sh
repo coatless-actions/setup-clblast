@@ -60,4 +60,13 @@ platform_args=()
         cd /tmp && cp -r /work/tests . && mkdir -p scripts \
             && cp /work/scripts/verify-gemm.c scripts/
         tests/verify-contract.sh ok
+
+        # The package branch emits a bare "-lclblast" with no -L, so the
+        # numeric check above passes against ANY libclblast the default
+        # search path happens to offer. Inside a container that is very
+        # likely the right one, which is exactly why it is worth asserting
+        # rather than assuming: the assertion is cheap and its absence is
+        # what would let a second copy through unnoticed on a fuller image.
+        SC_CLBLAST_LIBRARY="$(printf "%s\n" "${out}" | sed -n "s/^clblast-library=//p")" \
+            tests/assert-module-identity.sh --measure
     '

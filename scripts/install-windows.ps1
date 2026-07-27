@@ -40,6 +40,26 @@
     itself prove the broken text is gone -- it could still be present
     somewhere neither -replace call touches.
 
+    The extracted tree carries an identity stamp, for the same reason
+    install-macos.sh's build tree does. Every file the completeness gate
+    below looks for is present in a tree extracted for a DIFFERENT version --
+    they are just the wrong files -- so "the tree looks complete" cannot on
+    its own justify reusing it and then reporting the version that was
+    requested. That gap is reachable: an actions/cache restore-keys
+    prefix-fallback hit, or a non-ephemeral self-hosted runner with a tree
+    left at the same path by an earlier job, both produce exactly it. The
+    stamp records the version, asset name and digest that produced the tree,
+    the tree is reusable only when all three match what is currently
+    requested, and the emitted clblast-version is read back out of the stamp
+    rather than echoed from the input -- so it names what is on disk.
+
+    The stamp deliberately does not include the OpenCL loader paths, unlike
+    the macOS one. Nothing in the extracted tree is built against the loader;
+    the only place it appears is the rewritten CLBlastConfig.cmake, which is
+    re-derived from the pristine copy on every run and so corrects itself.
+    Folding the loader into the stamp would force a re-download every time
+    that path changed, buying nothing.
+
     A pristine copy of the shipped file (CLBlastConfig.cmake.orig) is saved
     the first time the tree is extracted, and every rewrite reads from that
     copy rather than from CLBlastConfig.cmake itself. The tree this runs
@@ -165,7 +185,30 @@ function Test-TreeComplete([string] $Dir) {
     (Test-Path (Join-Path $Dir 'lib\cmake\CLBlast\CLBlastConfig.cmake'))
 }
 
-if (-not (Test-TreeComplete $treeDir)) {
+# Identity stamp, written only after a tree has been extracted AND its
+# contents confirmed to be the requested version. Files being present is
+# necessary but not sufficient (see the .DESCRIPTION above): the tree is
+# reusable only when this also matches everything currently requested.
+$stampFile = Join-Path $treeDir '.setup-clblast-stamp'
+$stampWanted = "version=$Version`nasset=$($resolved.Name)`nsha256=$($resolved.Sha256)"
+
+function Test-StampMatches([string] $Path, [string] $Wanted) {
+    if (-not (Test-Path $Path)) { return $false }
+    return ((Get-Content -Raw -Path $Path) -eq $Wanted)
+}
+
+# Reads the version out of a stamp, or $null when there is nothing to read.
+# This is what the emitted clblast-version comes from, so that the value
+# names the tree on disk rather than the input that asked for it.
+function Get-StampVersion([string] $Path) {
+    if (-not (Test-Path $Path)) { return $null }
+    if ((Get-Content -Raw -Path $Path) -match '(?m)^version=(?<v>\S+)\s*$') {
+        return $Matches['v']
+    }
+    return $null
+}
+
+if (-not ((Test-TreeComplete $treeDir) -and (Test-StampMatches $stampFile $stampWanted))) {
     $archive = Join-Path $InstallDir $resolved.Name
     Invoke-WebRequest -Uri $resolved.Url -OutFile $archive
     Assert-FileHash -Path $archive -Expected $resolved.Sha256 -Label "CLBlast archive ($Version)"
@@ -193,6 +236,25 @@ if (-not (Test-TreeComplete $treeDir)) {
              "The archive layout may have changed for release $Version. Check https://github.com/CNugteren/CLBlast/releases/tag/$Version."
     }
 
+    # Upstream names the top-level directory after the release it contains
+    # ("CLBlast-1.7.0-windows-x64", or "-Windows-x64" with a capital W on
+    # 1.5.x), which is the only statement of version that travels with the
+    # archive -- the DLL carries no version resource to read instead. It is
+    # read here rather than trusting the requested tag, so that a release
+    # whose asset does not contain what its tag says fails loudly instead of
+    # being installed under a name it does not deserve. The pattern is not a
+    # new bet: the Where-Object above already refuses any directory that does
+    # not begin "CLBlast-".
+    if ($extracted.Name -notmatch '^CLBlast-(?<ver>[0-9]+(\.[0-9]+)*)-') {
+        Fail "Could not read a version out of the extracted directory name '$($extracted.Name)'" `
+             "This action reports the version it actually installed, read from the archive's own top-level directory, and will not fall back to echoing the requested tag. Upstream's naming may have changed for release $Version; check https://github.com/CNugteren/CLBlast/releases/tag/$Version and open an issue at https://github.com/coatless-actions/setup-clblast/issues."
+    }
+    $installedVersion = $Matches['ver']
+    if ($installedVersion -ne $Version) {
+        Fail "CLBlast release '$Version' shipped an archive containing version $installedVersion" `
+             "The asset for this tag does not contain the release it names, so installing it would report a version that is not what is on disk. Upstream may have attached the wrong file to the release. Verify out of band before pinning this version."
+    }
+
     if (Test-Path $treeDir) { Remove-Item -Recurse -Force $treeDir }
     Move-Item -Path $extracted.FullName -Destination $treeDir
     Remove-Item -Recurse -Force $stage
@@ -205,6 +267,22 @@ if (-not (Test-TreeComplete $treeDir)) {
         Fail "Extracted CLBlast tree at '$treeDir' is missing one of: include\clblast_c.h, lib\clblast.lib, bin\clblast.dll, lib\cmake\CLBlast\CLBlastConfig.cmake" `
              "The archive layout may have changed for release $Version. Check https://github.com/CNugteren/CLBlast/releases/tag/$Version."
     }
+
+    # Written last, and only here: a failed or partial extraction must never
+    # leave behind a stamp that makes the next run trust the tree.
+    Set-Content -Path $stampFile -Value $stampWanted -NoNewline
+}
+
+# The version this action reports comes off the disk, not out of the input.
+# On a fresh extraction the stamp holds what the archive's own directory name
+# said; on a reuse the gate above has just confirmed the stamp matches
+# everything requested. Either way an unreadable stamp means the tree's
+# identity is unknown, and an unknown identity is not something to paper over
+# by echoing the requested tag back.
+$installedVersion = Get-StampVersion $stampFile
+if (-not $installedVersion) {
+    Fail "No usable identity stamp at '$stampFile' after installing CLBlast" `
+         "This should be unreachable: the tree was either just extracted and stamped, or reused because its stamp matched. Seeing this means the stamp could not be written or read back. Report it at https://github.com/coatless-actions/setup-clblast/issues"
 }
 
 # ---------- repair the shipped CMake package config ----------
@@ -337,7 +415,7 @@ Emit 'clblast-library'     ((Join-Path $treeDir 'lib\clblast.lib') -replace '\\'
 Emit 'clblast-cppflags'    "-I$includeFwd"
 Emit 'clblast-libs'        "-L$libFwd -lclblast"
 Emit 'clblast-bin-dir'     (Join-Path $treeDir 'bin')
-Emit 'clblast-version'     $Version
+Emit 'clblast-version'     $installedVersion
 Emit 'source-used'         'package'
 
 if ($cmakeUsable) {

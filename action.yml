@@ -50,6 +50,28 @@ outputs:
   max-abs-error:
     description: 'Largest absolute difference between the device GEMM and a host reference. Zero is the correct value, not a missing one. "nan" whenever verify-status is anything other than ok or wrong-result, since no comparable result was produced; empty when verify is false and the check was skipped'
     value: ${{ steps.check.outputs.max-abs-error }}
+  # These four say WHERE the GEMM ran, which no other output does. Every other
+  # signal this action produces is compatible with a different CLBlast, or a
+  # different ICD loader, having satisfied the link and done the arithmetic:
+  # the Linux package branch emits a bare '-lclblast' with no -L, and Windows
+  # resolves DLLs through a search order that puts PATH last. A caller that
+  # cares whether the library it installed is the library that ran compares
+  # clblast-module and opencl-module against clblast-library and
+  # setup-opencl's OpenCL_LIBRARY, in resolved form. This repository's own
+  # test.yml does that on its main matrix and its nightly legs; the
+  # comparison it uses is tests/assert-module-identity.sh.
+  platform-name:
+    description: 'CL_PLATFORM_NAME of the platform the GEMM ran on. Empty when no platform was found, and when verify is false'
+    value: ${{ steps.check.outputs.platform-name }}
+  device-name:
+    description: 'CL_DEVICE_NAME of the device the GEMM ran on. Empty when no device was found, and when verify is false'
+    value: ${{ steps.check.outputs.device-name }}
+  clblast-module:
+    description: 'Fully resolved path of the CLBlast shared library the verifier was actually bound to -- the .so/.dylib/.dll the loader mapped, which on Linux and macOS is the versioned file behind the symlink clblast-library names, and on Windows is the DLL rather than the import library. "unknown" when it could not be determined; empty when verify is false'
+    value: ${{ steps.check.outputs.clblast-module }}
+  opencl-module:
+    description: 'Fully resolved path of the OpenCL ICD loader the verifier was actually bound to. Compare against setup-opencl''s OpenCL_LIBRARY. "unknown" when it could not be determined; empty when verify is false'
+    value: ${{ steps.check.outputs.opencl-module }}
 
 runs:
   using: 'composite'
@@ -499,9 +521,17 @@ runs:
 
         if [ "${SC_VERIFY}" != "true" ]; then
           echo "::notice::Skipping the GEMM check because 'verify' is false"
+          # Every output this step owns is written here, not just the two that
+          # have a documented "skipped" value: an output an action declares
+          # but never writes is empty anyway, and listing them makes the
+          # skip path's contract visible next to the one it mirrors.
           {
             printf 'verify-status=skipped\n'
             printf 'max-abs-error=\n'
+            printf 'platform-name=\n'
+            printf 'device-name=\n'
+            printf 'clblast-module=\n'
+            printf 'opencl-module=\n'
           } >> "$GITHUB_OUTPUT"
           exit 0
         fi
@@ -510,12 +540,27 @@ runs:
         compiler="cc"
         command -v cc >/dev/null 2>&1 || compiler="gcc"
 
+        # verify-gemm.c calls dladdr to report which CLBlast and which ICD
+        # loader the process actually bound to. That lives in libdl on glibc
+        # before 2.34 and in libc from 2.34 onward, where -ldl remains as an
+        # empty stub for exactly this kind of link line. macOS has no libdl at
+        # all (dladdr is in libSystem) and mingw has none either, so the flag
+        # is added on Linux only rather than unconditionally.
+        #
+        # Written as an 'if' rather than '[ ... ] && extra_libs=-ldl': under
+        # 'set -e' an AND-list whose test fails is itself a failed command,
+        # so the short form would abort this step on every non-Linux runner.
+        extra_libs=""
+        if [ "${RUNNER_OS}" = "Linux" ]; then
+          extra_libs="-ldl"
+        fi
+
         check_dir="$(mktemp -d)"
         # shellcheck disable=SC2086
         "${compiler}" -O2 -o "${check_dir}/verify" \
           "${GITHUB_ACTION_PATH}/scripts/verify-gemm.c" \
           ${SC_CLBLAST_CPPFLAGS} ${OPENCL_CPPFLAGS} \
-          ${SC_CLBLAST_LIBS} ${OPENCL_LIBS} -lm
+          ${SC_CLBLAST_LIBS} ${OPENCL_LIBS} ${extra_libs} -lm
 
         set +e
         output="$("${check_dir}/verify")"
@@ -543,6 +588,6 @@ runs:
 
         if [ "${rc}" -ne 0 ]; then
           echo "::error::The installed CLBlast produced an incorrect GEMM (verify-status=${status})"
-          echo "This is a real numerical failure, not a link error -- CLBlastSgemm can return success while leaving the output buffer garbage. On macOS check that SDKROOT is exported (PoCL's runtime kernel link needs it) and that setup-opencl ran before this step. On Linux check that no second CLBlast is ahead of this one on the link line. Set 'verify' to 'false' only if you accept an unverified library."
+          echo "This is a real numerical failure, not a link error -- CLBlastSgemm can return success while leaving the output buffer garbage. On macOS check that SDKROOT is exported (PoCL's runtime kernel link needs it) and that setup-opencl ran before this step. On Linux check that no second CLBlast is ahead of this one on the link line -- the clblast-module and opencl-module lines printed above name the library and the ICD loader this run was actually bound to, so compare them against the clblast-library output and OpenCL_LIBRARY rather than guessing. Set 'verify' to 'false' only if you accept an unverified library."
           exit 1
         fi
