@@ -956,11 +956,21 @@ jobs:
           SC_STATUS: ${{ steps.third.outputs.verify-status }}
         run: |
           set -euo pipefail
-          before="$(cat "${RUNNER_TEMP}/first-orig-mtime")"
-          after="$(stat -c '%Y' "${SC_ROOT}/lib/cmake/CLBlast/CLBlastConfig.cmake.orig")"
-          echo "first CLBlastConfig.cmake.orig mtime = ${before}"
-          echo "third CLBlastConfig.cmake.orig mtime = ${after}"
-          if [ "${before}" = "${after}" ]; then
+          # NOT an mtime comparison. 7z restores each entry's timestamp as
+          # stored in the archive, so a file that came out of the same archive
+          # twice has the same mtime whether it was re-extracted or never
+          # touched -- the signal is constant regardless of the answer. (The
+          # sibling reuse check in this workflow had the same fault and read a
+          # backwards mtime as a rebuild.)
+          #
+          # The stamp is written by install-windows.ps1 itself rather than
+          # restored from the archive, so its CONTENT is the direct evidence:
+          # the corrupted 0.0.0 stamp can only have become the real one by the
+          # code path under test running.
+          stamp="$(cat "${SC_ROOT}/.setup-clblast-stamp")"
+          echo "stamp after the third run:"
+          echo "${stamp}"
+          if printf '%s' "${stamp}" | grep -q '^version=0\.0\.0$'; then
             echo "::error::A corrupted stamp did not force a re-extraction; install-windows.ps1 served the stale tree instead of self-correcting"
             exit 1
           fi
