@@ -92,6 +92,10 @@ if [ "${mode}" = "compare" ]; then
     # nothing.
     got_clblast="${SC_CLBLAST_MODULE:?SC_CLBLAST_MODULE is required without --measure}"
     got_opencl="${SC_OPENCL_MODULE:?SC_OPENCL_MODULE is required without --measure}"
+    # Windows asserts the platform instead of the loader (see below); the
+    # workflow exports both names beside the module paths.
+    got_platform="${SC_PLATFORM_NAME:-}"
+    expected_platform="${SC_EXPECT_PLATFORM:-}"
 else
     workdir="$(mktemp -d)"
     trap 'rm -rf "${workdir}"' EXIT
@@ -122,6 +126,8 @@ else
 
     got_clblast="$(printf '%s\n' "${keys}" | sed -n 's/^clblast-module=//p')"
     got_opencl="$(printf '%s\n' "${keys}" | sed -n 's/^opencl-module=//p')"
+    got_platform="$(printf '%s\n' "${keys}" | sed -n 's/^platform-name=//p')"
+    expected_platform="${SC_EXPECT_PLATFORM:-}"
 fi
 
 # Both sides of every comparison go through this, never raw strings. The
@@ -198,9 +204,39 @@ if [ "$(canon "${got_clblast}")" != "$(canon "${expected_clblast}")" ]; then
          "Resolved forms compared: '$(canon "${got_clblast}")' against '$(canon "${expected_clblast}")'. Another CLBlast satisfied the link or the loader search first. On Linux that is what a bare '-lclblast' with no -L invites when a second copy sits on the default search path; on Windows the PE search order reaches the application directory and System32 before PATH. The numbers this run produced are correct, and they say nothing whatever about the library this action installed."
 fi
 
-if [ "$(canon "${got_opencl}")" != "$(canon "${expected_opencl}")" ]; then
+# The loader is asserted everywhere EXCEPT Windows, and the exception is a
+# statement about Windows rather than a concession.
+#
+# Windows ships its own ICD loader at System32\OpenCL.dll, and the PE search
+# order reaches System32 before PATH, so that is what binds no matter what
+# setup-opencl puts on PATH. That is also the right answer: an ICD loader is
+# the OS's dispatch layer, vendor runtimes register themselves with it under
+# HKLM, and deliberately binding a second loader alongside it is the hazard
+# this pair of actions refuses elsewhere -- it is exactly why Homebrew's
+# CLBlast bottle is rejected on macOS. The Khronos loader this action installs
+# on Windows earns its keep at BUILD time, supplying the headers and the import
+# library; it is not meant to win at run time.
+#
+# What still has to be proved on Windows is the same claim by another route:
+# that the arithmetic ran on the runtime that was installed for it. The
+# platform name carries that, since the device comes from the vendor ICD the
+# loader dispatched to. Note the consequence for setup-opencl, which is worth
+# knowing rather than discovering later: OCL_ICD_FILENAMES is a Khronos-loader
+# variable, so on Windows it is inert, and pinning the runtime works because
+# the installer registers the DLL in HKLM -- not because of that export.
+if [ "${os}" = "Windows" ]; then
+    if [ -z "${expected_platform:-}" ]; then
+        printf 'loader identity not asserted on Windows; platform is %s\n' "${got_platform:-unknown}"
+    elif ! printf '%s' "${got_platform}" | tr '[:upper:]' '[:lower:]' \
+             | grep -qF "$(printf '%s' "${expected_platform}" | tr '[:upper:]' '[:lower:]')"; then
+        fail "The GEMM ran on OpenCL platform '${got_platform}', not the '${expected_platform}' that was installed for it" \
+             "On Windows the ICD loader is the OS's own (System32\\OpenCL.dll) and binding it is correct, so the loader path proves nothing here. The platform does: it names the vendor runtime the loader dispatched to, and a mismatch means the GEMM ran on some other OpenCL implementation already registered on the machine."
+    else
+        printf 'loader is the OS ICD dispatcher, as expected on Windows; platform = %s\n' "${got_platform}"
+    fi
+elif [ "$(canon "${got_opencl}")" != "$(canon "${expected_opencl}")" ]; then
     fail "The GEMM ran on ICD loader '${got_opencl}', not the '${expected_opencl}' setup-opencl installed" \
-         "Resolved forms compared: '$(canon "${got_opencl}")' against '$(canon "${expected_opencl}")'. On Windows this is what the PE search order produces on its own: Windows ships an OpenCL.dll in System32, which is searched before PATH, so the loader setup-opencl put on PATH never gets a chance -- fixing it belongs in setup-opencl or in how the consumer is launched, not here. On macOS it means Apple's OpenCL.framework was bound instead of the Khronos loader, the configuration this action already refuses for CLBlast itself. Either way the device enumeration, the ICD lookup and the kernel compiler all belong to a loader nobody chose."
+         "Resolved forms compared: '$(canon "${got_opencl}")' against '$(canon "${expected_opencl}")'. On macOS it means Apple's OpenCL.framework was bound instead of the Khronos loader, the configuration this action already refuses for CLBlast itself. On Linux a second loader on the default search path won the link. Either way the device enumeration, the ICD lookup and the kernel compiler all belong to a loader nobody chose."
 fi
 
 printf 'PASS: the GEMM ran on the CLBlast and the ICD loader that were installed for it\n'

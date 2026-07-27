@@ -332,6 +332,13 @@ jobs:
         env:
           SC_CLBLAST_MODULE: ${{ steps.setup.outputs.clblast-module }}
           SC_OPENCL_MODULE: ${{ steps.setup.outputs.opencl-module }}
+          # Windows binds the OS's own ICD loader from System32 by PE search
+          # order, which is correct there, so the loader path proves nothing
+          # and the platform is asserted instead. Matched as a substring
+          # against the vendor family setup-opencl installed -- 'intel' on
+          # Windows -- since the full name carries decoration that is the
+          # runtime's to change.
+          SC_EXPECT_PLATFORM: ${{ runner.os == 'Windows' && 'Intel' || '' }}
           SC_CLBLAST_LIBRARY: ${{ steps.setup.outputs.clblast-library }}
           SC_CLBLAST_ROOT: ${{ steps.setup.outputs.clblast-root }}
           SC_PLATFORM_NAME: ${{ steps.setup.outputs.platform-name }}
@@ -1291,6 +1298,13 @@ jobs:
         env:
           SC_CLBLAST_MODULE: ${{ steps.setup.outputs.clblast-module }}
           SC_OPENCL_MODULE: ${{ steps.setup.outputs.opencl-module }}
+          # Windows binds the OS's own ICD loader from System32 by PE search
+          # order, which is correct there, so the loader path proves nothing
+          # and the platform is asserted instead. Matched as a substring
+          # against the vendor family setup-opencl installed -- 'intel' on
+          # Windows -- since the full name carries decoration that is the
+          # runtime's to change.
+          SC_EXPECT_PLATFORM: ${{ runner.os == 'Windows' && 'Intel' || '' }}
           SC_CLBLAST_LIBRARY: ${{ steps.setup.outputs.clblast-library }}
           SC_CLBLAST_ROOT: ${{ steps.setup.outputs.clblast-root }}
         run: tests/assert-module-identity.sh
