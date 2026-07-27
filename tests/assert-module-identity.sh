@@ -225,6 +225,17 @@ fi
 # variable, so on Windows it is inert, and pinning the runtime works because
 # the installer registers the DLL in HKLM -- not because of that export.
 if [ "${os}" = "Windows" ]; then
+    # Empty is rejected before the comparison, and separately from a
+    # mismatch, for the same reason "unknown" is above: a mismatch means the
+    # wrong runtime served the GEMM, while empty means this check saw nothing
+    # and proves nothing. Comparing it anyway reports the wrong diagnosis --
+    # "ran on platform ''" reads as a substituted runtime when the real fault
+    # is that the workflow did not pass the name through.
+    if [ -n "${expected_platform:-}" ] && [ -z "${got_platform}" ]; then
+        fail "The verifier reported no OpenCL platform name, so the runtime it used cannot be established" \
+             "SC_PLATFORM_NAME reached this script empty. On Windows the loader path proves nothing (the OS dispatcher is bound by design), so the platform is the only evidence of which runtime ran, and without it this check asserts nothing at all. Confirm the calling step exports SC_PLATFORM_NAME from the action's platform-name output."
+    fi
+
     if [ -z "${expected_platform:-}" ]; then
         printf 'loader identity not asserted on Windows; platform is %s\n' "${got_platform:-unknown}"
     elif ! printf '%s' "${got_platform}" | tr '[:upper:]' '[:lower:]' \

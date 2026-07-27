@@ -1315,6 +1315,7 @@ jobs:
           # Windows -- since the full name carries decoration that is the
           # runtime's to change.
           SC_EXPECT_PLATFORM: ${{ runner.os == 'Windows' && 'Intel' || '' }}
+          SC_PLATFORM_NAME: ${{ steps.setup.outputs.platform-name }}
           SC_CLBLAST_LIBRARY: ${{ steps.setup.outputs.clblast-library }}
           SC_CLBLAST_ROOT: ${{ steps.setup.outputs.clblast-root }}
         run: tests/assert-module-identity.sh
